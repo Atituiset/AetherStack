@@ -1,5 +1,6 @@
 add_library(phy STATIC
     src/qpsk.cpp
+    src/ofdm.cpp
 )
 
 target_include_directories(phy PUBLIC

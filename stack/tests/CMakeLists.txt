@@ -19,6 +19,7 @@ target_link_libraries(stack_tests PRIVATE
 
 add_executable(phy_tests
     ../phy/tests/test_qpsk.cpp
+    ../phy/tests/test_ofdm.cpp
 )
 
 target_link_libraries(phy_tests PRIVATE
