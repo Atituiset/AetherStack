@@ -1,0 +1,27 @@
+# C++ build
+build/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+lmt/node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# Claude local settings
+.claude/
