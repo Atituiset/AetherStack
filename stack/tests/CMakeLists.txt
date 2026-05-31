@@ -36,7 +36,41 @@ target_link_libraries(mac_tests PRIVATE
     gtest_main
 )
 
+add_executable(rlc_tests
+    ../rlc/tests/test_rlc_tm.cpp
+)
+
+target_link_libraries(rlc_tests PRIVATE
+    rlc
+    gtest_main
+)
+
+add_executable(pdcp_tests
+    ../pdcp/tests/test_pdcp_entity.cpp
+)
+
+target_link_libraries(pdcp_tests PRIVATE
+    pdcp
+    rlc
+    gtest_main
+)
+
+add_executable(vertical_tests
+    test_vertical.cpp
+)
+
+target_link_libraries(vertical_tests PRIVATE
+    pdcp
+    rlc
+    mac
+    phy
+    gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(stack_tests)
 gtest_discover_tests(phy_tests)
 gtest_discover_tests(mac_tests)
+gtest_discover_tests(rlc_tests)
+gtest_discover_tests(pdcp_tests)
+gtest_discover_tests(vertical_tests)
