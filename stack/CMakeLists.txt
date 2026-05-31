@@ -1,4 +1,5 @@
 add_subdirectory(common)
+add_subdirectory(phy)
 add_subdirectory(ue)
 add_subdirectory(bs)
 

@@ -17,5 +17,15 @@ target_link_libraries(stack_tests PRIVATE
     gtest_main
 )
 
+add_executable(phy_tests
+    ../phy/tests/test_qpsk.cpp
+)
+
+target_link_libraries(phy_tests PRIVATE
+    phy
+    gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(stack_tests)
+gtest_discover_tests(phy_tests)
