@@ -1,6 +1,6 @@
 # M1 计划书：物理层最小闭环（Phase 1 PHY）
 
-> **状态**: `PLANNED` — 尚未开始实现。本文档随实现进度持续更新。
+> **状态**: `COMPLETED` ✅
 > **预计工期**: 2~4 周
 > **前置依赖**: M0 骨架（CMake/Logger/Channel Sim/Web LMT）
 
@@ -124,12 +124,13 @@ C++ 实现必须与参考模型输出逐 sample 一致（浮点误差 < 1e-4）�
 | M1.1 QPSK | ✅ 完成 | 7 个单元测试通过，Python 参考模型验证 BER=0 |
 | M1.2 OFDM Tx | ✅ 完成 | 8 个 OFDM/Tx/Rx 测试通过，CP 验证正确 |
 | M1.3 OFDM Rx | ✅ 完成 | 与 Tx 合并实现，round-trip BER=0 |
-| M1.4 E2E 闭环 | 🔴 未开始 | |
+| M1.4 E2E 闭环 | ✅ 完成 | UE/BS 通过 UDP 交换 IQ 采样，18 个测试全通过 |
 
 ---
 
 ## 更新日志
 
+- `2026-06-01`: M1.4 E2E 闭环完成 — UE/BS 通过 UDP+PHY 交换 IQ 采样，M1 全部完成
 - `2026-06-01`: M1.2+M1.3 OFDM Tx/Rx 完成 — Cooley-Tukey FFT, CP 验证, 15 个测试全通过
 - `2026-06-01`: M1.1 QPSK 完成 — C++ 实现 + Python 参考模型 + 7 个 Google Test 用例
 - `2026-05-31`: 初始计划书创建

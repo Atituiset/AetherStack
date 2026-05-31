@@ -1,5 +1,6 @@
 add_library(common STATIC
     src/logger.cpp
+    src/udp_transport.cpp
 )
 
 target_include_directories(common PUBLIC
