@@ -27,6 +27,16 @@ target_link_libraries(phy_tests PRIVATE
     gtest_main
 )
 
+add_executable(mac_tests
+    ../mac/tests/test_mac.cpp
+)
+
+target_link_libraries(mac_tests PRIVATE
+    mac
+    gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(stack_tests)
 gtest_discover_tests(phy_tests)
+gtest_discover_tests(mac_tests)
