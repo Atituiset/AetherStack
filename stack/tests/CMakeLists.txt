@@ -98,6 +98,20 @@ target_link_libraries(full_attach_tests PRIVATE
     gtest_main
 )
 
+add_executable(user_plane_tests
+    test_user_plane.cpp
+)
+
+target_link_libraries(user_plane_tests PRIVATE
+    app
+    pdcp
+    rlc
+    mac
+    phy
+    common
+    gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(stack_tests)
 gtest_discover_tests(phy_tests)
@@ -108,3 +122,4 @@ gtest_discover_tests(vertical_tests)
 gtest_discover_tests(rrc_tests)
 gtest_discover_tests(nas_tests)
 gtest_discover_tests(full_attach_tests)
+gtest_discover_tests(user_plane_tests)

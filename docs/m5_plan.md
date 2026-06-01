@@ -1,6 +1,6 @@
 # M5 计划书：可观测性增强 & 数据传输
 
-> **状态**: `PLANNED` — 尚未开始实现。本文档随实现进度持续更新。
+> **状态**: `COMPLETED` ✅ — MSC 生成器 + PDU 分析器 + 用户面 ping-pong，63 个单测全通过。
 > **预计工期**: 2 周
 > **前置依赖**: M4 初始附着全流程完成
 
@@ -93,12 +93,15 @@ tools/
 
 | 里程碑 | 状态 | 备注 |
 |--------|------|------|
-| M5.1 MSC 生成 | 🔴 未开始 | 前置：M4 完成 |
-| M5.2 PDU 分析 | 🔴 未开始 | |
-| M5.3 用户面 | 🔴 未开始 | |
+| M5.1 MSC 生成 | 🟢 完成 | generate_msc.py 输出 Mermaid 时序图 |
+| M5.2 PDU 分析 | 🟢 完成 | pdu_analyzer.py 逐层解包 MAC→PDCP→RRC/NAS |
+| M5.3 用户面 | 🟢 完成 | AppLayer + 全栈 PHY round-trip ping-pong |
 
 ---
 
 ## 更新日志
 
 - `2026-05-31`: 初始计划书创建
+- `2026-06-01`: M5.1 MSC 生成器完成（Python, Mermaid 时序图输出）
+- `2026-06-01`: M5.2 PDU 分析器完成（Python, 逐层解包 hex dump）
+- `2026-06-01`: M5.3 用户面数据贯通（AppLayer + PHY AWGN round-trip）

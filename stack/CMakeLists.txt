@@ -5,6 +5,7 @@ add_subdirectory(rlc)
 add_subdirectory(pdcp)
 add_subdirectory(rrc)
 add_subdirectory(nas)
+add_subdirectory(app)
 add_subdirectory(ue)
 add_subdirectory(bs)
 
