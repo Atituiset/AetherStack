@@ -1,6 +1,6 @@
 # M6 计划书：Web LMT 核心功能开发
 
-> **状态**: `PLANNED` — 尚未开始实现。本文档随实现进度持续更新。
+> **状态**: `COMPLETED` — M6.1–M6.4 全部实现并通过验证。
 > **预计工期**: 3 周（可与 M4/M5 部分并行）
 > **前置依赖**: M0 Web LMT 骨架 + M4 控制面流程数据
 
@@ -103,13 +103,14 @@ lmt/src/
 
 | 里程碑 | 状态 | 备注 |
 |--------|------|------|
-| M6.1 拓扑图 | 🔴 未开始 | 可与 M4 并行 |
-| M6.2 状态机 | 🔴 未开始 | |
-| M6.3 MSC | 🔴 未开始 | |
-| M6.4 PDU 查看 | 🔴 未开始 | |
+| M6.1 拓扑图 | ✅ 已完成 | TopologyCanvas.tsx — SVG, UE/BS 节点 + 连接线状态动画 |
+| M6.2 状态机 | ✅ 已完成 | FsmViewer.tsx — MAC/RRC/NAS 三行 FSM 高亮 |
+| M6.3 MSC | ✅ 已完成 | MscDiagram.tsx — 箭头列表式 MSC，50 条窗口 |
+| M6.4 PDU 查看 | ✅ 已完成 | PduDetail.tsx + usePduStore — hex dump 模态框 + PDU 列表 |
 
 ---
 
 ## 更新日志
 
 - `2026-05-31`: 初始计划书创建
+- `2026-06-01`: M6.1–M6.4 全部实现：TopologyCanvas (SVG)、FsmViewer (MAC/RRC/NAS)、MscDiagram (事件→箭头列表)、PduDetail (hex dump 模态框 + usePduStore hook)。App.tsx 重构为左面板(拓扑+FSM)+右面板标签页(日志/MSC/PDU)。TypeScript 编译通过，63 个 C++ 测试全部通过。
