@@ -9,6 +9,9 @@ __pycache__/
 # Node
 lmt/node_modules/
 
+# mdBook build output
+docs-book/book/
+
 # IDE
 .vscode/
 .idea/
