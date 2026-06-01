@@ -67,6 +67,37 @@ target_link_libraries(vertical_tests PRIVATE
     gtest_main
 )
 
+add_executable(rrc_tests
+    ../rrc/tests/test_rrc_state.cpp
+    ../rrc/tests/test_rrc_connection.cpp
+)
+
+target_link_libraries(rrc_tests PRIVATE
+    rrc
+    gtest_main
+)
+
+add_executable(nas_tests
+    ../nas/tests/test_nas_attach.cpp
+)
+
+target_link_libraries(nas_tests PRIVATE
+    nas
+    gtest_main
+)
+
+add_executable(full_attach_tests
+    test_full_attach.cpp
+)
+
+target_link_libraries(full_attach_tests PRIVATE
+    rrc
+    nas
+    mac
+    common
+    gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(stack_tests)
 gtest_discover_tests(phy_tests)
@@ -74,3 +105,6 @@ gtest_discover_tests(mac_tests)
 gtest_discover_tests(rlc_tests)
 gtest_discover_tests(pdcp_tests)
 gtest_discover_tests(vertical_tests)
+gtest_discover_tests(rrc_tests)
+gtest_discover_tests(nas_tests)
+gtest_discover_tests(full_attach_tests)

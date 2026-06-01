@@ -1,6 +1,6 @@
 # M4 计划书：RRC 与 NAS 最小功能
 
-> **状态**: `PLANNED` — 尚未开始实现。本文档随实现进度持续更新。
+> **状态**: `COMPLETED` ✅ — RRC 连接建立 + NAS 附着 + 全流程集成，59 个单测全通过。
 > **预计工期**: 2~3 周
 > **前置依赖**: M3 RLC/PDCP 透传完成
 >
@@ -154,13 +154,17 @@ stack/
 
 | 里程碑 | 状态 | 备注 |
 |--------|------|------|
-| M4.1 RRC SIB | 🔴 未开始 | 前置：M3 完成 |
-| M4.2 RRC 连接 | 🔴 未开始 | |
-| M4.3 NAS 附着 | 🔴 未开始 | |
-| M4.4 全流程 | 🔴 未开始 | |
+| M4.1 RRC SIB | 🟢 完成 | MIB/SIB1 encode/decode round-trip |
+| M4.2 RRC 连接 | 🟢 完成 | UE/BS RRC Setup 3-msg handshake，5 个 RRC 连接单测 |
+| M4.3 NAS 附着 | 🟢 完成 | UE/BS Attach Request/Accept，4 个 NAS 单测 |
+| M4.4 全流程 | 🟢 完成 | 冷启动→SIB→RACH→RRC→NAS Attach Complete，2 个集成单测 |
 
 ---
 
 ## 更新日志
 
 - `2026-05-31`: 初始计划书创建
+- `2026-06-01`: M4.1 RRC 系统消息完成（MIB/SIB1 encode/decode）
+- `2026-06-01`: M4.2 RRC 连接建立完成（UE/BS Setup 三步握手）
+- `2026-06-01`: M4.3 NAS 附着完成（IMSI 交换 + TMSI 分配）
+- `2026-06-01`: M4.4 全流程集成测试通过（冷启动→SIB→RACH→RRC→NAS）
