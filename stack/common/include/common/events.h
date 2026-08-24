@@ -111,6 +111,12 @@ inline constexpr char TRAFFIC_STATS[] = "TRAFFIC_STATS";
 // fields: {layer, direction(TX|RX), len, hex(capped 48B), brief}
 inline constexpr char PDU_TRACE[] = "PDU_TRACE";
 
+// ---- Demo orchestration (M8.2) ---------------------------------------------
+// Emitted by tools/demo/demo_scenario.py (Python side) into the log pipeline,
+// not by the C++ stack; rendered as a progress banner in the Web LMT.
+// fields: {phase(boot|attach|traffic|release|done), title, progress, detail}
+inline constexpr char DEMO_PHASE[] = "DEMO_PHASE";
+
 } // namespace ev
 
 #endif // AETHER_COMMON_EVENTS_H

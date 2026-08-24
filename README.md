@@ -1,135 +1,127 @@
-# AetherStack 📡
+# AetherStack
 
-A wireless communication system MVP built with a **layered skill-driven** approach. Target: a simulated UE and gNB on a single machine, observable end-to-end.
-
-> ⚠️ **Current Status: M0 Skeleton Only**
-> The protocol stack is **not yet implemented**. What exists today is the engineering skeleton: build system, structured logging, simulation channel, and a Web LMT dashboard. Real protocol logic (PHY, MAC, RLC, PDCP, RRC, NAS) will be added incrementally following the skill cards in `.skills/`.
-
----
-
-## 🏗️ Architecture
+A 5G-NR-inspired **software protocol stack** written from scratch in C++17 —
+PHY to user plane — with a live UDP/OFDM air interface, a channel simulator,
+and a Web-based Local Maintenance Terminal (LMT).
 
 ```
-┌─────────────────────────────────────────┐
-│  Web LMT (TypeScript + React)           │
-│  Real-time log stream, node status      │
-│  http://localhost:3000                  │
-└──────────────┬──────────────────────────┘
-               │ WebSocket :8765
-┌──────────────▼──────────────────────────┐
-│  Python Tooling Layer                   │
-│  log_server.py  – UDP → WebSocket relay │
-│  sim_channel.py – UDP relay + loss/lat  │
-└──────────────┬──────────────────────────┘
-               │ UDP :9999 (logs) / :10001-10002 (data)
-┌──────────────▼──────────────────────────┐
-│  C++ Protocol Stack (skeleton)          │
-│  UE / BS processes with structured JSON │
-│  logging over UDP. No protocol logic yet│
-└─────────────────────────────────────────┘
+ ┌────────┐  IQ/UDP   ┌───────────────┐  IQ/UDP   ┌────────┐
+ │   UE   ├──────────►│    Channel    ├──────────►│   BS   │
+ │ (C++)  │◄──────────│  Simulator    │◄──────────│ (C++)  │
+ └───┬────┘           │ loss·blackout │           └───┬────┘
+     │                └───────────────┘               │
+     │            structured JSON logs (UDP 9999)     │
+     └──────────────────────┬─────────────────────────┘
+                            ▼
+                     [ Log Server ] ──WebSocket 8765──► Web LMT (:3000)
 ```
 
----
+## Protocol stack
 
-## 📁 Directory Structure
+| Layer | What it does |
+|-------|--------------|
+| PHY | QPSK modulation + OFDM (Cooley-Tukey FFT, CP), IQ over UDP |
+| MAC | PDU mux/demux (LCID), full 4-step RACH contention procedure |
+| RLC / PDCP | Transparent-mode relay, transparent PDCP |
+| RRC | Connection setup/release state machines, MIB/SIB1 broadcast |
+| NAS | Attach request/accept, detach, TMSI assignment |
+| App | User-plane ping-pong with sequence numbers and RTT accounting |
 
-```
-.
-├── CMakeLists.txt              # Top-level build
-├── Makefile                    # Convenience wrapper
-├── start_demo.sh               # One-command orchestrator
-├── README.md                   # This file
-├── docs/                       # DeepSeek design conversations
-│   ├── deepseek-1.md .. 5.md
-├── .skills/                    # Skill cards for agent-driven dev
-│   ├── m0_1_project_structure.md
-│   ├── m0_2_unified_logger.md
-│   └── m0_4_web_lmt_skeleton.md
-├── stack/                      # C++ protocol stack
-│   ├── common/                 # Shared logger library
-│   ├── ue/                     # UE executable skeleton
-│   ├── bs/                     # BS executable skeleton
-│   └── tests/                  # Google Test suite
-├── tools/                      # Python tooling
-│   ├── log_server/
-│   └── channel/
-└── lmt/                        # TypeScript Web frontend
-    └── src/
-```
+**Orchestration layer** (`stack/core`): `UeNode` / `BsNode` own all layer
+entities; process mains are thin shells (socket poll + timer tick +
+command channel). Everything is tick-driven — fully deterministic in tests.
 
----
-
-## 🚀 Quick Start
-
-### One-command run
+## Quick start
 
 ```bash
-./start_demo.sh
+git clone <repo> && cd AetherStack
+./start_demo.sh                 # builds if needed, starts everything
+# open http://localhost:3000
 ```
 
-Then open **http://localhost:3000** in your browser.
+Unattended scripted demo (attach → traffic → release, narrated in the LMT
+banner):
 
-### Manual steps
-
-Build C++ stack:
 ```bash
-make
+./start_demo.sh --with-demo --loss-rate 0.05
 ```
 
-Run tests:
+`Ctrl+C` tears down every component.
+
+### Driving the UE by hand
+
+Type commands into the UE's stdin, or send them via UDP (what the LMT and
+the demo driver use):
+
 ```bash
-make test
+echo attach | nc -u -w1 127.0.0.1 10101
+echo "traffic on" | nc -u -w1 127.0.0.1 10101
 ```
 
-Start Python services:
+Commands: `attach` `detach` `send <text>` `traffic on|off` `stats` `status`.
+
+## Tests & verification
+
 ```bash
-python3 tools/log_server/log_server.py &
-python3 tools/channel/sim_channel.py &
+make test                       # 93 unit/E2E tests (gtest)
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DAETHER_SANITIZE=ON \
+  && cmake --build build-asan -j && (cd build-asan && ctest)   # ASan+UBSan
+python3 tools/scripts/check_events_sync.py      # event catalog C++<->TS mirror
+
+# cross-process lifecycle smoke (direct or through the lossy channel)
+python3 tools/test_scripts/e2e_smoke.py --timeout 12
+python3 tools/test_scripts/e2e_smoke.py --channel --loss-rate 0.15 --timeout 20
+
+# fault recovery: clean -> 50% loss -> blackout -> auto-resume
+python3 tools/test_scripts/recovery_test.py
+
+# long-run stability harness (default 30 min, RSS/stall/crash guards)
+python3 tools/test_scripts/stability_run.py --duration 1800 \
+    --channel --loss-rate 0.05 --blackout "600:10,1200:8"
 ```
 
-Start Web LMT:
-```bash
-cd lmt && npm install && npm run dev
+## Milestones
+
+| Milestone | Scope | Status |
+|-----------|-------|--------|
+| M0 | Skeleton: CMake, logger, channel sim, web LMT | ✅ |
+| M1 | L1 closed loop: QPSK → OFDM → E2E IQ exchange | ✅ |
+| M2 | MAC: PDU codec + 4-step RACH (UE+BS) | ✅ |
+| M3 | RLC TM + PDCP transparent vertical passthrough | ✅ |
+| M4 | RRC connection + NAS attach flow | ✅ |
+| M5 | Observability + user-plane ping-pong | ✅ |
+| M6 | Web LMT: topology / FSM / MSC / PDU inspector | ✅ |
+| M6.5 | Cross-process end-to-end (nodes over real UDP+PHY), event catalog, command channels | ✅ |
+| M7 | Sustained loopback, ASan audit, 30-min stability, fault recovery | ✅ |
+| M8 | One-command demo launcher, unattended scenario, LMT demo banner | ✅ |
+
+Design documents per milestone live in [`docs/`](docs); rendered guides in
+[`docs-book/`](docs-book).
+
+## Repository layout
+
+```
+stack/
+  common/    logger (JSON+UDP), UDP transport, event catalog (events.h)
+  core/      air-frame codec, deterministic timers, UeNode/BsNode orchestration
+  phy/       QPSK, OFDM, IQ serialization
+  mac/ rlc/ pdcp/ rrc/ nas/ app/
+  ue/ bs/    thin process shells
+lmt/         React + Vite local maintenance terminal
+tools/
+  channel/   UDP relay: loss / latency / blackout / loss schedules
+  log_server/UDP->WebSocket fan-out with backpressure + command forwarding
+  demo/      unattended scenario driver
+  test_scripts/  smoke, stability and fault-recovery harnesses
+  scripts/   MSC generator, PDU analyzer, latency report, CI checks
 ```
 
-Run C++ nodes:
-```bash
-./build/bin/bs --log-host 127.0.0.1 --log-port 9999
-./build/bin/ue --log-host 127.0.0.1 --log-port 9999
-```
+## Ports
 
----
-
-## 🧪 What's Working (M0)
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| C++ build (CMake) | ✅ | `make` produces `ue` and `bs` |
-| Structured JSON logger | ✅ | Thread-safe, UDP output, no deps |
-| Google Test framework | ✅ | Fetched automatically by CMake |
-| Python log server | ✅ | UDP 9999 → WebSocket 8765 |
-| Python channel sim | ✅ | UDP relay + configurable loss/latency |
-| Web LMT | ✅ | Log stream, filters, mock data, auto-reconnect |
-
----
-
-## 📋 What's NOT Working Yet
-
-- ❌ Physical layer (QPSK, OFDM, sync)
-- ❌ MAC layer (RACH, scheduling, HARQ)
-- ❌ RLC / PDCP / RRC / NAS
-- ❌ Actual PDU encoding/decoding
-- ❌ Real UE-BS handshake
-
-These will be built incrementally following the skill cards. See `.skills/` and `docs/` for the roadmap.
-
----
-
-## 🛠️ Development Approach
-
-This project is being built with a **skill-card-driven** methodology:
-1. Each skill card defines one atomic, testable unit of work.
-2. The agent reads the card, implements, tests, and reports.
-3. You review and approve before moving to the next card.
-
-See `docs/deepseek-3.md` for the full 8-phase roadmap.
+| Port | Purpose |
+|------|---------|
+| 10001 / 20002 | UE / BS PHY (IQ datagrams) |
+| 11001 / 21002 | Channel simulator uplink / downlink ingress |
+| 10101 / 10102 | UE / BS command channels |
+| 9999 / 8765 | Log server UDP in / WebSocket out |
+| 3000 | Web LMT (Vite dev server) |

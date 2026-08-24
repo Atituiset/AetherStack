@@ -96,6 +96,9 @@ export const ev = {
 
   // PDU inspector: fields {layer, direction, len, hex, brief}
   PDU_TRACE: 'PDU_TRACE',
+
+  // Demo orchestrator (module=DEMO): fields {phase,title,progress,detail}
+  DEMO_PHASE: 'DEMO_PHASE',
 } as const
 
 export type EventName = (typeof ev)[keyof typeof ev]

@@ -6,6 +6,7 @@ import TopologyCanvas from './components/TopologyCanvas'
 import FsmViewer from './components/FsmViewer'
 import MscDiagram from './components/MscDiagram'
 import PduDetail, { usePduStore, PduEntry } from './components/PduDetail'
+import DemoBanner from './components/DemoBanner'
 
 const MOCK_EVENTS: Partial<LogEvent>[] = [
   { module: 'UE', level: 'INFO', event: ev.PROCESS_START, fields: { msg: 'UE starting up' } },
@@ -197,6 +198,8 @@ export const App: React.FC = () => {
           </button>
         </div>
       </header>
+
+      <DemoBanner messages={messages} />
 
       <main style={{ display: 'flex', flexGrow: 1, gap: 16, overflow: 'hidden' }}>
         <section className="glass-panel" style={{ width: 320, flexShrink: 0, padding: 20, display: 'flex', flexDirection: 'column', overflowY: 'auto', gap: 16 }}>
