@@ -48,6 +48,8 @@ std::vector<uint8_t> bytes_to_bits(const uint8_t* data, size_t len) {
     if (len < sizeof(uint32_t)) return {};
     uint32_t bit_count;
     std::memcpy(&bit_count, data, sizeof(uint32_t));
+    size_t byte_count = (static_cast<size_t>(bit_count) + 7) / 8;
+    if (byte_count > len - sizeof(uint32_t)) return {}; // truncated / malformed
     std::vector<uint8_t> bits(bit_count);
     for (uint32_t i = 0; i < bit_count; ++i) {
         uint8_t byte_val = data[sizeof(uint32_t) + i / 8];

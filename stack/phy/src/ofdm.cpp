@@ -108,4 +108,11 @@ std::vector<uint8_t> phy_rx(
     return qpsk_demodulate(data_symbols);
 }
 
+std::vector<uint8_t> phy_rx_auto(
+    const std::vector<std::complex<float>>& samples,
+    int n_fft,
+    int cp_len) {
+    return qpsk_demodulate(ofdm_rx(samples, n_fft, cp_len));
+}
+
 }

@@ -27,6 +27,20 @@ void NasBs::handle_message(uint32_t tmsi, const std::vector<uint8_t>& pdu) {
         auto encoded = accept.encode();
         if (send_cb_) send_cb_(new_tmsi, encoded);
         LOG_INFO("NAS_ATTACH_ACCEPT_TX", {{"imsi", imsi}, {"tmsi", std::to_string(new_tmsi)}});
+
+    } else if (msg.msg_type == NasMessageType::DETACH) {
+        // Detaching UE identifies itself via the TMSI in the message value.
+        uint32_t detaching_tmsi = msg.value.size() >= 4
+            ? msg.value[0] | (msg.value[1] << 8) | (msg.value[2] << 16) | (msg.value[3] << 24)
+            : tmsi;
+        auto it = ue_contexts_.find(detaching_tmsi);
+        if (it != ue_contexts_.end()) {
+            LOG_INFO("NAS_DETACH_RX", {{"tmsi", std::to_string(detaching_tmsi)},
+                                        {"imsi", it->second.imsi}});
+            ue_contexts_.erase(it);
+        } else {
+            LOG_WARN("NAS_DETACH_UNKNOWN", {{"tmsi", std::to_string(detaching_tmsi)}});
+        }
     }
 }
 

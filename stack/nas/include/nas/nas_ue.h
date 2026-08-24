@@ -30,6 +30,7 @@ public:
     uint32_t assigned_tmsi() const { return assigned_tmsi_; }
 
     void send_attach_request(const std::string& imsi);
+    void send_detach();
     void on_message(const std::vector<uint8_t>& pdu);
 
 private:

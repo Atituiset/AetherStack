@@ -5,6 +5,7 @@ namespace mac {
 
 void RachBs::set_send_callback(RachSendCallback cb) { send_cb_ = std::move(cb); }
 void RachBs::set_state_callback(RachStateCallback cb) { state_cb_ = std::move(cb); }
+void RachBs::set_ccch_handler(CcchHandler handler) { ccch_handler_ = std::move(handler); }
 
 void RachBs::on_prach_received(PreambleIndex preamble_idx) {
     RaRnti ra_rnti = 0x4300 | preamble_idx;
@@ -49,6 +50,11 @@ void RachBs::on_msg3_received(RaRnti ra_rnti, const std::vector<uint8_t>& msg3_d
                                 {"c_rnti", std::to_string(crnti)}});
     it->second.rach_complete = true;
     LOG_INFO("RA_SUCCESS", {{"c_rnti", std::to_string(crnti)}});
+
+    // MSG3 may carry the CCCH PDU (e.g. RRC SetupRequest) after its header.
+    if (msg3_data.size() > 3 && ccch_handler_) {
+        ccch_handler_(crnti, {msg3_data.begin() + 3, msg3_data.end()});
+    }
 }
 
 const RachBs::UeContext* RachBs::find_ue(RaRnti ra_rnti) const {

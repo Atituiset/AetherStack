@@ -20,6 +20,7 @@ target_link_libraries(stack_tests PRIVATE
 add_executable(phy_tests
     ../phy/tests/test_qpsk.cpp
     ../phy/tests/test_ofdm.cpp
+    ../phy/tests/test_phy_io.cpp
 )
 
 target_link_libraries(phy_tests PRIVATE
@@ -112,8 +113,20 @@ target_link_libraries(user_plane_tests PRIVATE
     gtest_main
 )
 
+add_executable(core_tests
+    ../core/tests/test_radio_frames.cpp
+    ../core/tests/test_timer_list.cpp
+)
+
+target_link_libraries(core_tests PRIVATE
+    core
+    common
+    gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(stack_tests)
+gtest_discover_tests(core_tests)
 gtest_discover_tests(phy_tests)
 gtest_discover_tests(mac_tests)
 gtest_discover_tests(rlc_tests)

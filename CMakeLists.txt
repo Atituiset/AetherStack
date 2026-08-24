@@ -18,3 +18,5 @@ else()
 endif()
 
 add_subdirectory(stack)
+
+enable_testing()

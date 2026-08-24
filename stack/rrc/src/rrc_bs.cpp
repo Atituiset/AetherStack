@@ -17,7 +17,9 @@ void RrcBs::handle_message(uint16_t rnti, const std::vector<uint8_t>& pdu) {
     auto msg = RrcMessage::decode(pdu);
 
     if (msg.msg_type == RrcMessageType::SETUP_REQUEST) {
-        uint16_t new_crnti = next_crnti_++;
+        // Honor the C-RNTI assigned by MAC (MSG3 path) when provided; only
+        // allocate here when called standalone (legacy direct-test path).
+        uint16_t new_crnti = (rnti != 0) ? rnti : next_crnti_++;
         UeContext ctx;
         ctx.c_rnti = new_crnti;
         ctx.state = UeState::CONNECTING;

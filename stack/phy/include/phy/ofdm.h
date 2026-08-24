@@ -35,6 +35,13 @@ std::vector<uint8_t> phy_rx(
     int n_fft = DEFAULT_N_FFT,
     int cp_len = DEFAULT_CP_LEN);
 
+// Full PHY Rx chain with automatic bit-count detection from the sample count.
+// Decodes every complete OFDM symbol available (2 bits per subcarrier).
+std::vector<uint8_t> phy_rx_auto(
+    const std::vector<std::complex<float>>& samples,
+    int n_fft = DEFAULT_N_FFT,
+    int cp_len = DEFAULT_CP_LEN);
+
 }
 
 #endif

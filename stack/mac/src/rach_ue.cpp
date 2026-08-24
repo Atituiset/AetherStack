@@ -7,6 +7,7 @@ RachUe::RachUe(const RachConfig& config) : config_(config) {}
 
 void RachUe::set_send_callback(RachSendCallback cb) { send_cb_ = std::move(cb); }
 void RachUe::set_state_callback(RachStateCallback cb) { state_cb_ = std::move(cb); }
+void RachUe::set_msg3_provider(Msg3Provider provider) { msg3_provider_ = std::move(provider); }
 
 void RachUe::transition(RachState new_state) {
     RachState old = state_;
@@ -45,12 +46,17 @@ void RachUe::on_rar_received(RaRnti ra_rnti, uint16_t timing_advance, uint8_t ul
     LOG_INFO("MAC_RACH_MSG2_RX", {{"ra_rnti", std::to_string(ra_rnti)},
                                    {"ta", std::to_string(timing_advance)}});
 
-    // Send MSG3: simplified RRC Setup Request (just placeholder)
+    // Send MSG3: [type][ra_rnti LE][optional CCCH payload from provider]
     std::vector<uint8_t> msg3 = {static_cast<uint8_t>(RachMsgType::MSG3_RRC_REQ),
                                   static_cast<uint8_t>(ra_rnti & 0xFF),
                                   static_cast<uint8_t>((ra_rnti >> 8) & 0xFF)};
+    if (msg3_provider_) {
+        auto ccch = msg3_provider_();
+        msg3.insert(msg3.end(), ccch.begin(), ccch.end());
+    }
     if (send_cb_) send_cb_(RachMsgType::MSG3_RRC_REQ, msg3);
-    LOG_INFO("MAC_RACH_MSG3", {{"ra_rnti", std::to_string(ra_rnti)}});
+    LOG_INFO("MAC_RACH_MSG3", {{"ra_rnti", std::to_string(ra_rnti)},
+                                {"ccch_len", std::to_string(msg3.size() - 3)}});
 
     transition(RachState::WAIT_CONTENTION_RESOLVE);
 }

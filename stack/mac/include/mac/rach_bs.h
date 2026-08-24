@@ -3,6 +3,7 @@
 
 #include "mac/rach_common.h"
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -12,8 +13,13 @@ class RachBs {
 public:
     RachBs() = default;
 
+    // Receives the CCCH payload carried in MSG3 (after its 3-byte header)
+    // together with the C-RNTI assigned to that UE.
+    using CcchHandler = std::function<void(uint16_t crnti, const std::vector<uint8_t>& ccch)>;
+
     void set_send_callback(RachSendCallback cb);
     void set_state_callback(RachStateCallback cb);
+    void set_ccch_handler(CcchHandler handler);
 
     // Handle received MSG1 (PRACH preamble from UE)
     void on_prach_received(PreambleIndex preamble_idx);
@@ -34,6 +40,7 @@ public:
 private:
     RachSendCallback send_cb_;
     RachStateCallback state_cb_;
+    CcchHandler ccch_handler_;
     std::unordered_map<RaRnti, UeContext> ue_contexts_;
     uint16_t next_crnti_ = 0x0001;
 };
