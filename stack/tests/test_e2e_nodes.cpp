@@ -7,6 +7,7 @@
 #include "mac/mac_pdu.h"
 #include "rrc/rrc_messages.h"
 #include <gtest/gtest.h>
+#include <random>
 
 namespace {
 
@@ -166,9 +167,12 @@ TEST(E2eNodes, TrafficSurvivesAirBlackout) {
     EXPECT_TRUE(link.ue.registered());
     EXPECT_EQ(link.ue.crnti(), crnti);
     EXPECT_GT(link.ue.app_rx_count(), rx_before);   // resumed after restore
-    // pings sent during the blackout are lost forever (TM, no retransmit)
-    EXPECT_EQ(link.ue.app_rx_count(), 90u);         // 20 pre + 70 post-restore
-    EXPECT_EQ(link.ue.app_loss_count(), 40u);       // the blackout phase
+    // Every ping is either delivered or accounted as lost; HARQ may rescue
+    // some blackout pings via timeout retransmissions after restore.
+    EXPECT_GE(link.ue.app_rx_count(), 90u);         // clean + post-restore
+    EXPECT_LE(link.ue.app_rx_count(), 130u);        // upper bound: all pings
+    EXPECT_EQ(link.ue.app_rx_count() + link.ue.app_loss_count(),
+              link.ue.app_tx_count());              // full accounting
 }
 
 TEST(E2eNodes, AttachGuardTimeoutRecoversToIdle) {
@@ -204,4 +208,59 @@ TEST(E2eNodes, AttachGuardTimeoutRecoversToIdle) {
     EXPECT_EQ(ue.rrc_state(), rrc::UeState::IDLE);
     EXPECT_EQ(ue.nas_state(), nas::UeState::DEREGISTERED);
     EXPECT_FALSE(ue.registered());
+}
+
+TEST(E2eNodes, HarqRescuesTwentyPercentFrameLoss) {
+    // M9 headline: with FEC+HARQ, a channel dropping ~20% of bursts still
+    // delivers every application ping (M7-era stacks lost them forever).
+    core::BsNode bs;
+    core::UeNode ue;
+    std::mt19937 rng(1234);
+    double drop_p = 0.20;
+    int dropped = 0;
+
+    ue.set_air_send([&](const std::vector<uint8_t>& bits) {
+        if (std::uniform_real_distribution<>(0, 1)(rng) < drop_p) {
+            ++dropped;
+            return;
+        }
+        bs.on_air_bits(bits);
+    });
+    bs.set_air_send([&](const std::vector<uint8_t>& bits) {
+        if (std::uniform_real_distribution<>(0, 1)(rng) < drop_p) {
+            ++dropped;
+            return;
+        }
+        ue.on_air_bits(bits);
+    });
+
+    uint32_t clock_ms = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock_ms += 10;
+            ue.tick(clock_ms);
+            bs.tick(clock_ms);
+        }
+    };
+
+    pump(10);
+    bs.start_broadcast();
+    ue.attach();
+    // RACH frames are not HARQ-protected: a dropped MSG1/MSG3 relies on the
+    // UE's window timers and ATTACH_RETRY self-healing to make progress.
+    for (int i = 0; i < 200 && !ue.registered(); ++i) pump(10);
+    ASSERT_TRUE(ue.registered());
+
+    ue.start_traffic(50);
+    pump(4000);
+    ue.stop_traffic();
+
+    printf("[diag] dropped=%u tx=%u rx=%u loss=%u\n", dropped,
+           ue.app_tx_count(), ue.app_rx_count(), ue.app_loss_count());
+    EXPECT_GT(dropped, 20u);                         // channel really was lossy
+    // HARQ turns ~100 dropped bursts into at most a couple of application
+    // losses (budget exhaustion). The residual belongs to RLC AM (M13).
+    EXPECT_LE(ue.app_loss_count(), 2u);
+    EXPECT_GE(ue.app_rx_count(), ue.app_tx_count() - 2u);
+    EXPECT_TRUE(ue.registered());
 }

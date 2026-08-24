@@ -86,6 +86,11 @@ inline constexpr char NAS_ACCEPT_IGNORED[] = "NAS_ACCEPT_IGNORED"; // UE {state}
 inline constexpr char NAS_ATTACH_REQ_IGNORED[] = "NAS_ATTACH_REQ_IGNORED"; // UE {state}
 inline constexpr char NAS_DETACH_IGNORED[] = "NAS_DETACH_IGNORED"; // UE {state}
 
+// ---- Link reliability (M9 HARQ/FEC) ----------------------------------------
+inline constexpr char HARQ_RETX[] = "HARQ_RETX";   // {proc, attempt, reason(nack|timeout)}
+inline constexpr char HARQ_DROP[] = "HARQ_DROP";   // {proc, attempts}: budget exhausted
+inline constexpr char HARQ_COMBINE[] = "HARQ_COMBINE"; // RX {proc}: chase merging
+
 // ---- Attach orchestration -------------------------------------------------
 inline constexpr char UE_ATTACH_PENDING_SIB[] = "UE_ATTACH_PENDING_SIB"; // UE {}
 inline constexpr char UE_ATTACH_START[] = "UE_ATTACH_START"; // UE {imsi}

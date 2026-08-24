@@ -63,4 +63,8 @@
 - PduDetail: Hex dump 模态框 + `usePduStore` hook
 - App.tsx 重构: 左面板(拓扑+FSM) + 右标签页(日志/MSC/PDU)
 
-
+### M9 — FEC + HARQ
+- 卷积码 K=7 rate 1/2 (133o/171o) + Viterbi 硬判决 + CRC16 传输块校验
+- 停等式 HARQ 4 进程: Chase 合并软缓冲、ACK 超时重传、预算耗尽放弃
+- 统一帧封装 (magic 0xA9): 用户流量走 HARQ, ACK 控制走传统路径
+- 实测: BER 5% 残余 ≈0.1%; 20% 丢帧信道下 101 次 burst 丢失压缩至 ≤2

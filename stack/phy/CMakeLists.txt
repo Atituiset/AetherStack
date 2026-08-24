@@ -2,6 +2,7 @@ add_library(phy STATIC
     src/qpsk.cpp
     src/ofdm.cpp
     src/phy_io.cpp
+    src/fec.cpp
 )
 
 target_include_directories(phy PUBLIC

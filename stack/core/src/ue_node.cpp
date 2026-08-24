@@ -67,6 +67,26 @@ void UeNode::set_air_send(AirBitsSend send) { air_send_ = std::move(send); }
 void UeNode::tick(uint32_t now_ms) {
     now_ms_ = std::max(now_ms, now_ms_);
     timers_.tick(now_ms_);
+    pump_harq();
+}
+
+void UeNode::pump_harq() {
+    for (auto& e : harq_tx_.poll_timeouts(now_ms_)) {
+        trace_pdu("HARQ", "TX", "retx", e.coded);
+        send_frame(AirFrameType::DATA, crnti_cache_, e.coded);
+    }
+}
+
+void UeNode::send_ack(uint16_t to, const HarqRx::Result& res) {
+    if (!res.need_feedback || to == 0 || to == mac::RNTI_BROADCAST) return;
+    if (res.proc == 0x7F) return; // broadcast blocks carry no feedback
+    harq_tx_.advance(now_ms_);
+    std::vector<uint8_t> pdu = mac::build_pdu(
+        {{mac::LCID_HARQ_ACK,
+          {static_cast<uint8_t>(res.proc & 0x7F),
+           static_cast<uint8_t>(res.ack ? 1 : 0)}}});
+    trace_pdu("HARQ", "TX", res.ack ? "ack" : "nack", pdu);
+    send_frame(AirFrameType::DATA, to, pdu);
 }
 
 void UeNode::attach() {
@@ -112,6 +132,8 @@ void UeNode::abort_attach(const char* reason) {
     crnti_cache_ = 0;
     nas_ue_.force_deregistered();
     stop_traffic();
+    harq_tx_.reset();
+    harq_rx_.reset();
 }
 
 void UeNode::detach() {
@@ -126,6 +148,8 @@ void UeNode::detach() {
     pending_ccch_.clear();
     attach_requested_ = false;
     stop_traffic();
+    harq_tx_.reset();
+    harq_rx_.reset();
     LOG_INFO(ev::UE_DETACH_DONE, {});
 }
 
@@ -251,7 +275,19 @@ void UeNode::handle_rach_payload(AirFrameType type, uint16_t /*rnti*/,
     }
 }
 
-void UeNode::handle_data_pdu(uint16_t rnti, const std::vector<uint8_t>& pdu) {
+void UeNode::handle_data_pdu(uint16_t rnti, const std::vector<uint8_t>& payload) {
+    // DATA frames come in two flavours (M9): HARQ transport blocks (user
+    // traffic) and legacy raw MAC PDUs (HARQ-ACK control). The magic byte
+    // in the HARQ header tells them apart.
+    std::vector<uint8_t> pdu;
+    if (is_harq_framed(payload)) {
+        auto res = harq_rx_.receive(payload);
+        send_ack(rnti, res);
+        if (!res.delivered) return;
+        pdu = std::move(res.mac_pdu);
+    } else {
+        pdu = payload; // control frame: no HARQ feedback
+    }
     trace_pdu("MAC", "RX", rnti == mac::RNTI_BROADCAST ? "broadcast" : "dl data", pdu);
     for (auto& [lcid, sdu] : mac::parse_pdu(pdu)) {
         if (lcid == mac::LCID_MIB || lcid == mac::LCID_SIB1) {
@@ -283,6 +319,7 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
         case mac::LCID_CCCH: {
             trace_pdu("RRC", "RX", "dcch", sdu);
             rrc_ue_.on_message(sdu);
+            harq_rx_.reset(); // fresh connection: no cross-attach soft memory
             // Connection is up: proceed with the NAS attach if one is pending.
             if (attach_requested_ && nas_ue_.state() == nas::UeState::DEREGISTERED &&
                 rrc_ue_.state() == rrc::UeState::CONNECTED) {
@@ -304,8 +341,9 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
                                (static_cast<uint32_t>(data[1]) << 8) |
                                (static_cast<uint32_t>(data[2]) << 16) |
                                (static_cast<uint32_t>(data[3]) << 24);
-                ++app_rx_count_;
                 auto it = app_tx_time_.find(seq);
+                if (it != app_tx_time_.end()) ++app_rx_count_; // dedupe retx
+                auto it2 = app_tx_time_.find(seq);
                 if (it != app_tx_time_.end()) {
                     last_app_rtt_ms_ = static_cast<int64_t>(now_ms_) - it->second;
                     app_tx_time_.erase(it);
@@ -319,6 +357,18 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
             }
             break;
         }
+        case mac::LCID_HARQ_ACK: {
+            if (sdu.size() < 2) break;
+            uint8_t proc = sdu[0] & 0x7F;
+            harq_tx_.advance(now_ms_);
+            if (sdu[1]) {
+                harq_tx_.on_ack(proc);
+            } else if (auto e = harq_tx_.on_nack(proc)) {
+                trace_pdu("HARQ", "TX", "retx(nack)", e->coded);
+                send_frame(AirFrameType::DATA, crnti_cache_, e->coded);
+            }
+            break;
+        }
         default:
             break;
     }
@@ -327,7 +377,15 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
 void UeNode::uplink_send(uint8_t lcid, const std::vector<uint8_t>& sdu) {
     std::vector<uint8_t> pdu = mac::build_pdu({{lcid, sdu}});
     trace_pdu("MAC", "TX", "ul data", pdu);
-    send_frame(AirFrameType::DATA, crnti_cache_, pdu);
+
+    auto ev = harq_tx_.send(pdu);
+    if (!ev.has_value()) {
+        LOG_WARN(ev::HARQ_DROP, {{"proc", "255"},
+                                  {"attempts", "0"},
+                                  {"reason", "tx_busy"}});
+        return; // all processes busy: upper-layer loss accounting applies
+    }
+    send_frame(AirFrameType::DATA, crnti_cache_, ev->coded);
 }
 
 void UeNode::send_frame(AirFrameType type, uint16_t rnti,

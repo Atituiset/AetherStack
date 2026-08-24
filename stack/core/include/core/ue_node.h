@@ -2,6 +2,7 @@
 #define AETHER_CORE_UE_NODE_H
 
 #include "core/radio_frames.h"
+#include "core/harq.h"
 #include "core/timer_list.h"
 #include "mac/rach_ue.h"
 #include "nas/nas_ue.h"
@@ -101,8 +102,12 @@ private:
     void schedule_backoff_then_retry();
     void schedule_attach_retry();
     void sweep_lost_pings();
+    void pump_harq();            // timeouts -> retransmissions
+    void send_ack(uint16_t to, const HarqRx::Result& res);
 
     UeNodeConfig config_;
+    HarqTx harq_tx_;
+    HarqRx harq_rx_;
     mac::RachUe rach_ue_;
     rrc::RrcUe rrc_ue_;
     nas::NasUe nas_ue_;

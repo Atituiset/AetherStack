@@ -21,6 +21,7 @@ add_executable(phy_tests
     ../phy/tests/test_qpsk.cpp
     ../phy/tests/test_ofdm.cpp
     ../phy/tests/test_phy_io.cpp
+    ../phy/tests/test_fec.cpp
 )
 
 target_link_libraries(phy_tests PRIVATE
@@ -124,6 +125,18 @@ target_link_libraries(core_tests PRIVATE
     gtest_main
 )
 
+add_executable(harq_tests
+    test_harq.cpp
+)
+
+target_link_libraries(harq_tests PRIVATE
+    core
+    mac
+    phy
+    common
+    gtest_main
+)
+
 add_executable(e2e_node_tests
     test_e2e_nodes.cpp
 )
@@ -143,6 +156,7 @@ include(GoogleTest)
 gtest_discover_tests(stack_tests)
 gtest_discover_tests(core_tests)
 gtest_discover_tests(e2e_node_tests)
+gtest_discover_tests(harq_tests)
 gtest_discover_tests(phy_tests)
 gtest_discover_tests(mac_tests)
 gtest_discover_tests(rlc_tests)

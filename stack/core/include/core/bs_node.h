@@ -1,6 +1,7 @@
 #ifndef AETHER_CORE_BS_NODE_H
 #define AETHER_CORE_BS_NODE_H
 
+#include "core/harq.h"
 #include "core/radio_frames.h"
 #include "core/timer_list.h"
 #include "mac/rach_bs.h"
@@ -47,10 +48,15 @@ private:
     void handle_air_frame(const AirFrame& frame);
     void handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& pdu);
     void downlink_send(uint16_t rnti, uint8_t lcid, const std::vector<uint8_t>& sdu);
+    void downlink_raw(uint16_t rnti, uint8_t lcid, const std::vector<uint8_t>& sdu);
+    void pump_harq();
+    void send_ack(uint16_t to, const HarqRx::Result& res);
     void send_frame(AirFrameType type, uint16_t rnti,
                     const std::vector<uint8_t>& payload);
 
     BsNodeConfig config_;
+    HarqTx harq_tx_;
+    HarqRx harq_rx_;
     mac::RachBs rach_bs_;
     rrc::RrcBs rrc_bs_;
     nas::NasBs nas_bs_;

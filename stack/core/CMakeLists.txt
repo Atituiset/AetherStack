@@ -1,6 +1,7 @@
 add_library(core STATIC
     src/radio_frames.cpp
     src/timer_list.cpp
+    src/harq.cpp
     src/ue_node.cpp
     src/bs_node.cpp
 )
@@ -10,7 +11,7 @@ target_include_directories(core PUBLIC
 )
 
 # The node orchestration layer owns entities from every upper layer.
-target_link_libraries(core PUBLIC common mac rlc pdcp rrc nas)
+target_link_libraries(core PUBLIC common mac rlc pdcp rrc nas phy)
 
 set_target_properties(core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
