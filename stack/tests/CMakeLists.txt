@@ -22,6 +22,7 @@ add_executable(phy_tests
     ../phy/tests/test_ofdm.cpp
     ../phy/tests/test_phy_io.cpp
     ../phy/tests/test_fec.cpp
+    ../phy/tests/test_sync.cpp
 )
 
 target_link_libraries(phy_tests PRIVATE

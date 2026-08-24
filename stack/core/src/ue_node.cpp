@@ -237,7 +237,9 @@ void UeNode::emit_traffic_stats() {
 
 void UeNode::on_air_bits(const std::vector<uint8_t>& bits) {
     std::vector<uint8_t> bytes;
-    if (!unpack_air_bits(bits, bytes)) return;
+    if (!unpack_air_bits(bits, bytes)) {
+        return;
+    }
     AirFrame frame;
     if (!decode_frame(bytes.data(), bytes.size(), frame)) {
         LOG_WARN(ev::AIR_FRAME_DECODE_FAIL, {{"len", std::to_string(bits.size())}});

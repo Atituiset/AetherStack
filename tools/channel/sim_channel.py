@@ -42,7 +42,49 @@ def main():
     parser.add_argument("--loss-schedule", type=str, default="",
                         help="Time-varying loss 'start:end:rate,...' seconds "
                              "from launch, e.g. '30:60:0.5' (overrides --loss-rate)")
+    parser.add_argument("--awgn-snr", type=float, default=0.0,
+                        help="Add AWGN noise at this SNR in dB (0 = off, M10)")
+    parser.add_argument("--multipath", type=str, default="",
+                        help="One extra echo 'delay_samples,gain' (M10)")
     args = parser.parse_args()
+
+    import struct as _struct
+    echo_delay = 0
+    echo_gain = 0.0
+    if args.multipath:
+        delay_s, gain_s = args.multipath.split(",")
+        echo_delay, echo_gain = int(delay_s), float(gain_s)
+
+    def impair(data: bytes) -> bytes:
+        """Apply AWGN (+ optional single echo) to an IQ datagram."""
+        if args.awgn_snr <= 0 and echo_gain == 0.0:
+            return data
+        if len(data) < 4:
+            return data
+        count = _struct.unpack_from("<I", data, 0)[0]
+        floats = _struct.unpack_from(f"<{2*count}f", data, 4)
+        # signal power
+        pwr = 0.0
+        for i in range(count):
+            pwr += floats[2*i]**2 + floats[2*i+1]**2
+        pwr /= max(count, 1)
+        import math, random as _r
+        snr_lin = 10 ** (args.awgn_snr / 10)
+        npow = pwr / snr_lin if snr_lin > 0 else 0.0
+        sigma = math.sqrt(npow / 2) if npow > 0 else 0.0
+        out = []
+        for i in range(count):
+            re, im = floats[2*i], floats[2*i+1]
+            if echo_gain != 0.0 and i >= echo_delay:
+                # crude echo: attenuate earlier sample pair
+                j = 2*(i - echo_delay)
+                re += echo_gain * floats[j]
+                im += echo_gain * floats[j+1]
+            if sigma > 0:
+                re += _r.gauss(0, sigma)
+                im += _r.gauss(0, sigma)
+            out.extend((re, im))
+        return _struct.pack("<I", count) + _struct.pack(f"<{2*count}f", *out)
 
     blackout_windows = []
     for spec in filter(None, args.blackout.split(",")):
@@ -95,7 +137,7 @@ def main():
         if random.random() >= loss_at(time.monotonic() - t0):
             if args.latency > 0:
                 time.sleep(args.latency)
-            sock.sendto(data, ("127.0.0.1", dest_port))
+            sock.sendto(impair(data), ("127.0.0.1", dest_port))
             print(f"[Channel] RELAY {label}: {len(data)} bytes", flush=True)
         else:
             print(f"[Channel] DROP {label} : {len(data)} bytes", flush=True)

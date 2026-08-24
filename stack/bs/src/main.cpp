@@ -4,6 +4,7 @@
 #include "common/logger.h"
 #include "common/udp_transport.h"
 #include "core/bs_node.h"
+#include "phy/frame.h"
 #include "phy/phy_io.h"
 #include "phy/ofdm.h"
 #include <chrono>
@@ -68,8 +69,11 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, on_signal);
 
     core::BsNode bs;
+    const phy::FrameTxConfig frame_cfg{ n_fft, cp_len, /*pci=*/0 };
     bs.set_air_send([&](const std::vector<uint8_t>& bits) {
-        auto iq = phy::phy_tx(bits, n_fft, cp_len);
+        std::vector<std::complex<float>> iq = phy::phy_preamble_burst(frame_cfg);
+        auto data_iq = phy::phy_tx_data(bits, frame_cfg);
+        iq.insert(iq.end(), data_iq.begin(), data_iq.end());
         phy_sock.send(phy::iq_to_bytes(iq));
     });
 
@@ -86,7 +90,11 @@ int main(int argc, char* argv[]) {
         if (rx_len > 0) {
             auto iq = phy::bytes_to_iq(rx_buf, rx_len);
             if (!iq.empty()) {
-                bs.on_air_bits(phy::phy_rx_auto(iq, n_fft, cp_len));
+                phy::FrameRxResult res;
+                auto bits = phy::phy_rx_frame(iq, frame_cfg, res);
+                if (res.synced && res.pci_confirmed && !bits.empty()) {
+                    bs.on_air_bits(bits);
+                }
             }
         }
 

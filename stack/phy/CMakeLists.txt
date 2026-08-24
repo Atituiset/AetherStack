@@ -3,6 +3,8 @@ add_library(phy STATIC
     src/ofdm.cpp
     src/phy_io.cpp
     src/fec.cpp
+    src/sync.cpp
+    src/frame.cpp
 )
 
 target_include_directories(phy PUBLIC

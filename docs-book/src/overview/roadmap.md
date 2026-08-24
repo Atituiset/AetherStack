@@ -68,3 +68,8 @@
 - 停等式 HARQ 4 进程: Chase 合并软缓冲、ACK 超时重传、预算耗尽放弃
 - 统一帧封装 (magic 0xA9): 用户流量走 HARQ, ACK 控制走传统路径
 - 实测: BER 5% 残余 ≈0.1%; 20% 丢帧信道下 101 次 burst 丢失压缩至 ≤2
+
+### M10 — 小区搜索与同步
+- Zadoff-Chu PSS 三根序列滑动相关: 符号定时 + NID2; 双能量归一化
+- 简化 SSS 完成六小区 PCI; DMRS(LCG-QPSK) LS 信道估计 + 逐子载波均衡
+- phy_preamble_burst/phy_tx_data 分离, 射频适配层拼接; 两径衰落均衡后 BER<1%

@@ -17,7 +17,8 @@ void fft_cooley_tukey(std::complex<float>* data, int n, bool inverse) {
         if (i < j) std::swap(data[i], data[j]);
     }
     for (int len = 2; len <= n; len <<= 1) {
-        float ang = 2.0f * static_cast<float>(M_PI) / len * (inverse ? -1 : 1);
+        // Standard convention: forward exp(-j), inverse exp(+j) with 1/N.
+        float ang = 2.0f * static_cast<float>(M_PI) / len * (inverse ? 1 : -1);
         std::complex<float> wlen(std::cos(ang), std::sin(ang));
         for (int i = 0; i < n; i += len) {
             std::complex<float> w(1);
