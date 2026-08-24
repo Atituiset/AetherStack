@@ -63,18 +63,19 @@ PIDS+=($!)
 cd ..
 sleep 2
 
-# 6. Start C++ nodes
-echo -e "${YELLOW}[*] Starting BS node...${RESET}"
-./build/bin/bs --log-host 127.0.0.1 --log-port 9999 &
+# 6. Start C++ nodes (routed through the channel simulator per D3 topology)
+echo -e "${YELLOW}[*] Starting BS node (downlink via channel 21002)...${RESET}"
+./build/bin/bs --log-host 127.0.0.1 --log-port 9999 --ue-phy-port 21002 &
 PIDS+=($!)
 sleep 1
 
-echo -e "${YELLOW}[*] Starting UE node...${RESET}"
-./build/bin/ue --log-host 127.0.0.1 --log-port 9999 &
+echo -e "${YELLOW}[*] Starting UE node (uplink via channel 11001)...${RESET}"
+./build/bin/ue --log-host 127.0.0.1 --log-port 9999 --bs-phy-port 11001 &
 PIDS+=($!)
 
 echo -e "\n${GREEN}[+] AetherStack is running!${RESET}"
 echo -e "${GREEN}    Web LMT:${RESET} http://localhost:3000"
+echo -e "${GREEN}    UE commands (stdin): attach | detach | send <text> | status${RESET}"
 echo -e "${GREEN}    Press Ctrl+C to stop.${RESET}\n"
 
 wait

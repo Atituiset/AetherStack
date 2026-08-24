@@ -32,10 +32,13 @@ void NasUe::send_attach_request(const std::string& imsi) {
     msg.msg_type = NasMessageType::ATTACH_REQUEST;
     msg.value.assign(imsi.begin(), imsi.end());
     auto encoded = msg.encode();
+
+    // State first, then transmit: with a synchronous loop the peer's answer
+    // arrives inside the send callback and must meet us in REGISTERING.
+    transition(UeState::REGISTERING);
+
     if (send_cb_) send_cb_(encoded);
     LOG_INFO("NAS_ATTACH_REQUEST_TX", {{"imsi", imsi}});
-
-    transition(UeState::REGISTERING);
 }
 
 void NasUe::send_detach() {
@@ -52,9 +55,16 @@ void NasUe::send_detach() {
                  static_cast<uint8_t>((tmsi >> 16) & 0xFF),
                  static_cast<uint8_t>((tmsi >> 24) & 0xFF)};
     auto encoded = msg.encode();
+
+    assigned_tmsi_ = 0;
+    transition(UeState::DEREGISTERED);
+
     if (send_cb_) send_cb_(encoded);
     LOG_INFO("NAS_DETACH_TX", {{"tmsi", std::to_string(tmsi)}});
+}
 
+void NasUe::force_deregistered() {
+    if (state_ == UeState::DEREGISTERED) return;
     assigned_tmsi_ = 0;
     transition(UeState::DEREGISTERED);
 }

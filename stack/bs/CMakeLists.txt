@@ -2,4 +2,4 @@ add_executable(bs
     src/main.cpp
 )
 
-target_link_libraries(bs PRIVATE phy common)
+target_link_libraries(bs PRIVATE core phy)

@@ -15,11 +15,19 @@ namespace mac {
 // MAC PDU = [subheader1 + payload1] [subheader2 + payload2] ... [optional padding]
 //
 // Special LCIDs:
-//   0 = CCCH (Common Control Channel, used for RACH MSG3)
-//   1-32 = logical channels
+//   0 = CCCH (Common Control Channel, used for RACH MSG3 / RRC setup)
+//   1 = NAS DCCH (PDCP+RLC wrapped)
+//   2 = App DTCH (user plane, PDCP+RLC wrapped)
+//   61/62 = SIB1 / MIB system broadcast (BS -> all UEs, rnti 0xFFFF)
+//   63 = padding
 
 constexpr uint8_t LCID_CCCH = 0;
+constexpr uint8_t LCID_NAS_DCCH = 1;
+constexpr uint8_t LCID_APP_DTCH = 2;
+constexpr uint8_t LCID_SIB1 = 61; // 0x3D
+constexpr uint8_t LCID_MIB = 62;  // 0x3E
 constexpr uint8_t LCID_PADDING = 63; // 0x3F
+constexpr uint16_t RNTI_BROADCAST = 0xFFFF;
 
 struct MacSubheader {
     uint8_t lcid = 0;

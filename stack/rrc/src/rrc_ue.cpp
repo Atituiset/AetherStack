@@ -34,10 +34,37 @@ void RrcUe::start_connection() {
     msg.msg_type = RrcMessageType::SETUP_REQUEST;
     msg.value = {0x00};
     auto encoded = msg.encode();
+
+    transition(UeState::CONNECTING); // see nas_ue.cpp: state before transmit
+
     if (send_cb_) send_cb_(encoded);
     LOG_INFO("RRC_SETUP_REQUEST_TX", {});
+}
 
-    transition(UeState::CONNECTING);
+void RrcUe::release() {
+    if (state_ != UeState::CONNECTED) {
+        LOG_WARN("RRC_RELEASE_IGNORED", {{"state", ue_state_str(state_)}});
+        return;
+    }
+
+    uint16_t crnti = assigned_crnti_;
+    RrcMessage msg;
+    msg.msg_type = RrcMessageType::RELEASE;
+    msg.value = {static_cast<uint8_t>(crnti & 0xFF),
+                 static_cast<uint8_t>((crnti >> 8) & 0xFF)};
+    auto encoded = msg.encode();
+
+    transition(UeState::IDLE); // state before transmit
+    assigned_crnti_ = 0;
+
+    if (send_cb_) send_cb_(encoded);
+    LOG_INFO("RRC_RELEASE_TX", {{"c_rnti", std::to_string(crnti)}});
+}
+
+void RrcUe::force_idle() {
+    if (state_ == UeState::IDLE) return;
+    assigned_crnti_ = 0;
+    transition(UeState::IDLE);
 }
 
 void RrcUe::on_message(const std::vector<uint8_t>& pdu) {
@@ -57,10 +84,11 @@ void RrcUe::on_message(const std::vector<uint8_t>& pdu) {
         complete.value = {static_cast<uint8_t>(assigned_crnti_ & 0xFF),
                           static_cast<uint8_t>((assigned_crnti_ >> 8) & 0xFF)};
         auto encoded = complete.encode();
+
+        transition(UeState::CONNECTED); // state before transmit
+
         if (send_cb_) send_cb_(encoded);
         LOG_INFO("RRC_SETUP_COMPLETE_TX", {{"c_rnti", std::to_string(assigned_crnti_)}});
-
-        transition(UeState::CONNECTED);
     } else if (msg.msg_type == RrcMessageType::RELEASE) {
         assigned_crnti_ = 0;
         transition(UeState::IDLE);

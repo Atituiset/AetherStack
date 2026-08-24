@@ -27,14 +27,16 @@ void RachUe::start_rach() {
     assigned_ra_rnti_ = 0;
     assigned_crnti_ = 0;
 
+    // Transition first: with a synchronous in-memory loop the MSG2 reply
+    // arrives inside the MSG1 send callback, so WAIT_RAR must already hold.
+    transition(RachState::WAIT_RAR);
+
     // Send MSG1: PRACH preamble
     std::vector<uint8_t> msg1 = {static_cast<uint8_t>(RachMsgType::MSG1_PRACH),
                                   config_.preamble_index};
     if (send_cb_) send_cb_(RachMsgType::MSG1_PRACH, msg1);
     LOG_INFO("MAC_RACH_MSG1", {{"preamble", std::to_string(config_.preamble_index)},
                                 {"tx_count", std::to_string(preamble_tx_count_)}});
-
-    transition(RachState::WAIT_RAR);
 }
 
 void RachUe::on_rar_received(RaRnti ra_rnti, uint16_t timing_advance, uint8_t ul_grant) {
@@ -45,6 +47,10 @@ void RachUe::on_rar_received(RaRnti ra_rnti, uint16_t timing_advance, uint8_t ul
     assigned_ra_rnti_ = ra_rnti;
     LOG_INFO("MAC_RACH_MSG2_RX", {{"ra_rnti", std::to_string(ra_rnti)},
                                    {"ta", std::to_string(timing_advance)}});
+
+    // Same ordering rule as start_rach: be in WAIT_CONTENTION_RESOLVE
+    // before MSG3 (and thus MSG4) hit the wire.
+    transition(RachState::WAIT_CONTENTION_RESOLVE);
 
     // Send MSG3: [type][ra_rnti LE][optional CCCH payload from provider]
     std::vector<uint8_t> msg3 = {static_cast<uint8_t>(RachMsgType::MSG3_RRC_REQ),
@@ -57,8 +63,6 @@ void RachUe::on_rar_received(RaRnti ra_rnti, uint16_t timing_advance, uint8_t ul
     if (send_cb_) send_cb_(RachMsgType::MSG3_RRC_REQ, msg3);
     LOG_INFO("MAC_RACH_MSG3", {{"ra_rnti", std::to_string(ra_rnti)},
                                 {"ccch_len", std::to_string(msg3.size() - 3)}});
-
-    transition(RachState::WAIT_CONTENTION_RESOLVE);
 }
 
 void RachUe::on_contention_resolve(uint16_t crnti) {
@@ -94,6 +98,12 @@ void RachUe::on_contention_resolve_timeout() {
     if (state_ != RachState::WAIT_CONTENTION_RESOLVE) return;
     LOG_ERROR("RACH_CR_TIMEOUT", {});
     transition(RachState::IDLE);
+}
+
+void RachUe::force_idle() {
+    if (state_ != RachState::IDLE) {
+        transition(RachState::IDLE);
+    }
 }
 
 }

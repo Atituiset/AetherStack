@@ -33,6 +33,10 @@ public:
     void send_detach();
     void on_message(const std::vector<uint8_t>& pdu);
 
+    // Local reset without transmitting (fault recovery, e.g. attach guard
+    // timeout while the air interface is dead).
+    void force_deregistered();
+
 private:
     void transition(UeState new_state);
 

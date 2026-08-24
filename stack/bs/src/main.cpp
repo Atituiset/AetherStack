@@ -1,14 +1,26 @@
+// M6.5 T7: thin process shell. All protocol logic lives in core::BsNode;
+// this main only wires the UDP radio, drives the timer tick (SIB broadcast)
+// and logs lifecycle events.
 #include "common/logger.h"
 #include "common/udp_transport.h"
-#include "phy/ofdm.h"
+#include "core/bs_node.h"
 #include "phy/phy_io.h"
-#include "phy/qpsk.h"
+#include "phy/ofdm.h"
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <string>
-#include <thread>
 #include <vector>
+
+namespace {
+
+uint32_t monotonic_ms() {
+    using namespace std::chrono;
+    return static_cast<uint32_t>(
+        duration_cast<milliseconds>(steady_clock::now().time_since_epoch())
+            .count());
+}
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     std::string log_host = "127.0.0.1";
@@ -41,27 +53,27 @@ int main(int argc, char* argv[]) {
     LOG_INFO("PHY_UDP_READY", {{"local_port", std::to_string(local_phy_port)},
                                 {"dest", ue_addr + ":" + std::to_string(ue_phy_port)}});
 
-    const size_t bits_per_frame = 128;
-    int frame_count = 0;
+    core::BsNode bs;
+    bs.set_air_send([&](const std::vector<uint8_t>& bits) {
+        auto iq = phy::phy_tx(bits, n_fft, cp_len);
+        phy_sock.send(phy::iq_to_bytes(iq));
+    });
+
+    uint32_t now_ms = monotonic_ms();
+    bs.tick(now_ms);
+    bs.start_broadcast();
+    LOG_INFO("BS_SIB_BROADCAST_ON", {{"period_ms", "200"}});
 
     while (true) {
         uint8_t rx_buf[65536];
-        int rx_len = phy_sock.recv(rx_buf, sizeof(rx_buf), 2000);
+        int rx_len = phy_sock.recv(rx_buf, sizeof(rx_buf), 10);
         if (rx_len > 0) {
-            auto rx_iq = phy::bytes_to_iq(rx_buf, rx_len);
-            if (!rx_iq.empty()) {
-                auto rx_bits = phy::phy_rx(rx_iq, bits_per_frame, n_fft, cp_len);
-                LOG_INFO("PHY_RX_OK", {{"frame", std::to_string(++frame_count)},
-                                        {"iq_samples", std::to_string(rx_iq.size())},
-                                        {"bits", std::to_string(rx_bits.size())}});
-
-                std::vector<uint8_t> echo_bits(rx_bits.begin(), rx_bits.end());
-                auto tx_iq = phy::phy_tx(echo_bits, n_fft, cp_len);
-                auto pkt = phy::iq_to_bytes(tx_iq);
-                phy_sock.send(pkt);
-                LOG_INFO("PHY_TX_ECHO", {{"frame", std::to_string(frame_count)}});
+            auto iq = phy::bytes_to_iq(rx_buf, rx_len);
+            if (!iq.empty()) {
+                bs.on_air_bits(phy::phy_rx_auto(iq, n_fft, cp_len));
             }
         }
+        bs.tick(monotonic_ms());
     }
 
     return 0;

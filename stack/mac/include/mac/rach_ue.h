@@ -35,6 +35,9 @@ public:
     void on_rar_timeout();
     void on_contention_resolve_timeout();
 
+    // Abort any in-flight procedure and drop to IDLE (fault recovery).
+    void force_idle();
+
 private:
     void transition(RachState new_state);
 

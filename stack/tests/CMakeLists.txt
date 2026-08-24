@@ -124,9 +124,25 @@ target_link_libraries(core_tests PRIVATE
     gtest_main
 )
 
+add_executable(e2e_node_tests
+    test_e2e_nodes.cpp
+)
+
+target_link_libraries(e2e_node_tests PRIVATE
+    core
+    mac
+    rrc
+    nas
+    pdcp
+    rlc
+    common
+    gtest_main
+)
+
 include(GoogleTest)
 gtest_discover_tests(stack_tests)
 gtest_discover_tests(core_tests)
+gtest_discover_tests(e2e_node_tests)
 gtest_discover_tests(phy_tests)
 gtest_discover_tests(mac_tests)
 gtest_discover_tests(rlc_tests)

@@ -23,6 +23,10 @@ public:
     void on_sib1_received(const Sib1& sib1);
 
     void start_connection();
+    void release(); // UE-initiated release (sends RELEASE, drops to IDLE)
+    // Abort any in-flight procedure and drop to IDLE without transmitting
+    // (fault recovery, e.g. attach guard timeout).
+    void force_idle();
     void on_message(const std::vector<uint8_t>& pdu);
 
     uint16_t assigned_crnti() const { return assigned_crnti_; }

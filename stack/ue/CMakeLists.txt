@@ -2,4 +2,4 @@ add_executable(ue
     src/main.cpp
 )
 
-target_link_libraries(ue PRIVATE phy common)
+target_link_libraries(ue PRIVATE core phy)

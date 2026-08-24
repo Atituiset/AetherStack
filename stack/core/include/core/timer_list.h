@@ -40,6 +40,7 @@ private:
 
     std::vector<Entry> entries_;
     TimerId next_id_ = 1;
+    uint32_t last_now_ = 0; // clock anchor so schedule() can be absolute-based
 };
 
 }

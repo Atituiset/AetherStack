@@ -79,22 +79,38 @@
 
 ## 任务分解
 
-| # | 任务 | DoD |
-|---|------|-----|
-| T1 | core/radio_frames 编解码 | 单测往返 + 非法输入拒收 |
-| T2 | core/timer_list | 单测：到期/取消/周期 |
-| T3 | phy_io 越界修复 + phy_rx 自动长度 | 单测含畸形输入 |
-| T4 | RachUe MSG3 provider + RachBs 上抛 | mac_tests 更新 |
-| T5 | NAS 日志补齐 + DETACH 双端 | nas_tests 更新 |
-| T6 | UeNode/BsNode + 内存空口 E2E 测试 | attach→data→detach 全绿 |
-| T7 | ue/bs main 重写为薄壳 | 冒烟运行日志正确 |
-| T8 | sim_channel 重排端口 | 中继转发验证 |
-| T9 | events.h/PDU_TRACE/log_server 背压+命令通道 | 单测/手工验证 |
-| T10 | LMT 对齐（events.ts/App/store/mock） | tsc 通过 |
-| T11 | e2e_smoke.py 跨进程冒烟脚本 | 一键跑通退出码 0 |
+| # | 任务 | DoD | 状态 |
+|---|------|-----|------|
+| T1 | core/radio_frames 编解码 | 单测往返 + 非法输入拒收 | ✅ 完成 (M6.5 T1-T5) |
+| T2 | core/timer_list | 单测：到期/取消/周期 | ✅ 完成（后续修复绝对时钟锚点） |
+| T3 | phy_io 越界修复 + phy_rx 自动长度 | 单测含畸形输入 | ✅ 完成 (M6.5 T1-T5) |
+| T4 | RachUe MSG3 provider + RachBs 上抛 | mac_tests 更新 | ✅ 完成 (M6.5 T1-T5) |
+| T5 | NAS 日志补齐 + DETACH 双端 | nas_tests 更新 | ✅ 完成 (M6.5 T1-T5) |
+| T6 | UeNode/BsNode + 内存空口 E2E 测试 | attach→data→detach 全绿 | ✅ 完成（e2e_node_tests 5 例；修正先迁态后发送时序） |
+| T7 | ue/bs main 重写为薄壳 | 冒烟运行日志正确 | ✅ 完成（stdin 命令 attach/detach/send/status） |
+| T8 | sim_channel 重排端口 | 中继转发验证 | ✅ 完成（11001→BS, 21002→UE，中继日志确认） |
+| T9 | events.h/PDU_TRACE/log_server 背压+命令通道 | 单测/手工验证 | 🔴 未开始 |
+| T10 | LMT 对齐（events.ts/App/store/mock） | tsc 通过 | 🔴 未开始 |
+| T11 | e2e_smoke.py 跨进程冒烟脚本 | 一键跑通退出码 0 | 🔴 未开始 |
+
+---
+
+## 实现备注
+
+- **同步回环时序**：`RachUe`/`NasUe`/`RrcUe` 统一改为"先迁移状态、后发送 PDU"。
+  内存管道与跨进程 UDP 回环中，对端响应可能在发送回调内同步到达，
+  状态必须先行就位（如 NAS 在 REGISTERING 态才能接受 ATTACH_ACCEPT）。
+- **TimerList 绝对时钟**：schedule 的 deadline 锚定到最近一次 tick(now)，
+  修复时钟非零起步时定时器立即误触发的问题。
+- **RACH PDU 头**：MSG2/MSG3/MSG4 载荷自带 1 字节 RachMsgType 头，
+  UeNode/BsNode 解析偏移以此为基准（air frame 的 [type][rnti:2] 头之外）。
 
 ---
 
 ## 更新日志
 
 - `2026-08-24`: 初始计划书创建；深度分析结论并入设计决策
+- `2026-08-24`: T6–T8 完成。UeNode/BsNode 落地 + E2E 5 例全绿（91/91 总测试）；
+  ue/bs main 薄壳化；sim_channel D3 端口拓扑 + start_demo.sh 接线；
+  跨进程 UDP+PHY 冒烟验证 attach→data→detach 打通。
+  剩余：T9（事件目录/背压）、T10（LMT 对齐）、T11（冒烟脚本）

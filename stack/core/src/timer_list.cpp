@@ -6,9 +6,12 @@ namespace core {
 TimerId TimerList::schedule(uint32_t delay_ms, bool periodic, TimerCallback cb) {
     Entry e;
     e.id = next_id_++;
-    e.deadline = delay_ms;
+    // Deadlines are absolute on the owner's clock; anchored to the last
+    // tick() so timers armed mid-run (backoff, guards) fire after delay_ms,
+    // not relative to process start.
+    e.deadline = last_now_ + delay_ms;
     e.interval = periodic ? delay_ms : 0;
-    e.cb = cb;
+    e.cb = std::move(cb);
     entries_.push_back(std::move(e));
     return entries_.back().id;
 }
@@ -26,6 +29,10 @@ void TimerList::clear() {
 }
 
 uint32_t TimerList::tick(uint32_t now_ms) {
+    if (static_cast<int32_t>(now_ms - last_now_) > 0) {
+        last_now_ = now_ms;
+    }
+
     // Snapshot due ids first; callbacks are free to cancel themselves or others.
     std::vector<TimerId> due_ids;
     for (const auto& e : entries_) {
