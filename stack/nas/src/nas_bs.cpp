@@ -26,7 +26,7 @@ void NasBs::handle_message(uint32_t tmsi, const std::vector<uint8_t>& pdu) {
                         static_cast<uint8_t>((new_tmsi >> 24) & 0xFF)};
         auto encoded = accept.encode();
         if (send_cb_) send_cb_(new_tmsi, encoded);
-        LOG_INFO("NAS_ATTACH_ACCEPT_TX", {{"imsi", imsi}, {"tmsi", std::to_string(new_tmsi)}});
+        LOG_INFO(ev::NAS_ATTACH_ACCEPT_TX, {{"imsi", imsi}, {"tmsi", std::to_string(new_tmsi)}});
 
     } else if (msg.msg_type == NasMessageType::DETACH) {
         // Detaching UE identifies itself via the TMSI in the message value.
@@ -35,11 +35,11 @@ void NasBs::handle_message(uint32_t tmsi, const std::vector<uint8_t>& pdu) {
             : tmsi;
         auto it = ue_contexts_.find(detaching_tmsi);
         if (it != ue_contexts_.end()) {
-            LOG_INFO("NAS_DETACH_RX", {{"tmsi", std::to_string(detaching_tmsi)},
+            LOG_INFO(ev::NAS_DETACH_RX, {{"tmsi", std::to_string(detaching_tmsi)},
                                         {"imsi", it->second.imsi}});
             ue_contexts_.erase(it);
         } else {
-            LOG_WARN("NAS_DETACH_UNKNOWN", {{"tmsi", std::to_string(detaching_tmsi)}});
+            LOG_WARN(ev::NAS_DETACH_UNKNOWN, {{"tmsi", std::to_string(detaching_tmsi)}});
         }
     }
 }

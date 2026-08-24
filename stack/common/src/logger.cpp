@@ -133,7 +133,7 @@ void log(Level level,
     ss << "}}";
 
     std::string json = ss.str();
-    std::cout << json << '\n';
+    std::cout << json << std::endl; // flush: stdout is line-delimited telemetry
 
     if (g_udp_enabled && g_udp_sock >= 0) {
         sendto(g_udp_sock, json.c_str(), json.size(), 0,

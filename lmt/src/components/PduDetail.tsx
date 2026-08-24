@@ -1,8 +1,10 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useRef } from 'react'
+import ev from '../events'
 import { LogEvent } from '../hooks/useWebSocket'
 
 export interface PduEntry {
   id: string
+  seq: number
   timestamp: string
   direction: string
   layer: string
@@ -57,32 +59,47 @@ export const PduDetail: React.FC<PduDetailProps> = ({ pdu, onClose }) => {
             <HexRow key={i} offset={i * 16} bytes={hexBytes.slice(i * 16, i * 16 + 16)} layer={pdu.layer} />
           ))}
         </div>
-        <div style={{ marginTop: 12, fontSize: 11, color: '#4b5563' }}>{pdu.timestamp}</div>
+        <div style={{ marginTop: 12, fontSize: 11, color: '#4b5563' }}>
+          #{pdu.seq} · {pdu.timestamp}
+        </div>
       </div>
     </div>
   )
 }
 
+/**
+ * PDU store fed incrementally by server-side `_seq` (M6.5 D6): each event is
+ * processed exactly once even though the message window slides.
+ */
 export function usePduStore() {
   const [pdus, setPdus] = useState<PduEntry[]>([])
   const [selectedPdu, setSelectedPdu] = useState<PduEntry | null>(null)
+  const lastSeqRef = useRef(0)
 
-  const addPdu = useCallback((event: LogEvent) => {
-    if (event.event === 'PDU_TRACE' && event.fields) {
-      const entry: PduEntry = {
-        id: `${event.timestamp}-${Math.random().toString(36).slice(2, 6)}`,
-        timestamp: event.timestamp,
-        direction: event.fields.direction || '?',
-        layer: event.fields.layer || '?',
-        hex: event.fields.hex || '',
-        brief: event.fields.brief || '',
-        raw: event,
-      }
-      setPdus((prev) => [...prev.slice(-199), entry])
-    }
+  const addEvents = useCallback((events: LogEvent[]) => {
+    const fresh = events.filter(
+      (e) => e.event === ev.PDU_TRACE && typeof e._seq === 'number' && e._seq > lastSeqRef.current,
+    )
+    if (fresh.length === 0) return
+    lastSeqRef.current = Math.max(...fresh.map((e) => e._seq!), lastSeqRef.current)
+    setPdus((prev) =>
+      [
+        ...prev,
+        ...fresh.map((e) => ({
+          id: `${e._seq}`,
+          seq: e._seq!,
+          timestamp: e.timestamp,
+          direction: e.fields.direction || '?',
+          layer: e.fields.layer || '?',
+          hex: e.fields.hex || '',
+          brief: e.fields.brief || '',
+          raw: e,
+        })),
+      ].slice(-200),
+    )
   }, [])
 
-  return { pdus, selectedPdu, setSelectedPdu, addPdu }
+  return { pdus, selectedPdu, setSelectedPdu, addEvents }
 }
 
 export default PduDetail

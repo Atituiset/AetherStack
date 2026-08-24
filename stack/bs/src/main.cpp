@@ -1,17 +1,23 @@
-// M6.5 T7: thin process shell. All protocol logic lives in core::BsNode;
-// this main only wires the UDP radio, drives the timer tick (SIB broadcast)
-// and logs lifecycle events.
+// M6.5 T7/T9: thin process shell. All protocol logic lives in core::BsNode;
+// this main only wires the UDP radio, drives the timer tick (SIB broadcast),
+// answers the UDP command port (status/quit) and emits heartbeats.
 #include "common/logger.h"
 #include "common/udp_transport.h"
 #include "core/bs_node.h"
 #include "phy/phy_io.h"
 #include "phy/ofdm.h"
 #include <chrono>
+#include <csignal>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
+
+volatile std::sig_atomic_t g_stop = 0;
+
+void on_signal(int) { g_stop = 1; }
 
 uint32_t monotonic_ms() {
     using namespace std::chrono;
@@ -26,6 +32,7 @@ int main(int argc, char* argv[]) {
     std::string log_host = "127.0.0.1";
     uint16_t log_port = 9999;
     uint16_t local_phy_port = 20002;
+    uint16_t cmd_port = 10102;
     std::string ue_addr = "127.0.0.1";
     uint16_t ue_phy_port = 10001;
     int n_fft = 64;
@@ -36,22 +43,29 @@ int main(int argc, char* argv[]) {
         if (arg == "--log-host" && i + 1 < argc) log_host = argv[++i];
         else if (arg == "--log-port" && i + 1 < argc) log_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         else if (arg == "--local-phy-port" && i + 1 < argc) local_phy_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--cmd-port" && i + 1 < argc) cmd_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         else if (arg == "--ue-phy-addr" && i + 1 < argc) ue_addr = argv[++i];
         else if (arg == "--ue-phy-port" && i + 1 < argc) ue_phy_port = static_cast<uint16_t>(std::stoi(argv[++i]));
     }
 
     logging::init("BS", log_host, log_port);
-    LOG_INFO("PROCESS_START", {{"msg", "BS protocol stack started"}});
-    LOG_INFO("PHY_CONFIG", {{"n_fft", std::to_string(n_fft)}, {"cp_len", std::to_string(cp_len)}});
+    LOG_INFO(ev::PROCESS_START, {{"msg", "BS protocol stack started"}});
+    LOG_INFO(ev::PHY_CONFIG, {{"n_fft", std::to_string(n_fft)}, {"cp_len", std::to_string(cp_len)}});
 
     transport::UdpTransport phy_sock;
     if (!phy_sock.bind("0.0.0.0", local_phy_port)) {
-        LOG_ERROR("PHY_BIND_FAIL", {{"port", std::to_string(local_phy_port)}});
+        LOG_ERROR(ev::PHY_BIND_FAIL, {{"port", std::to_string(local_phy_port)}});
         return 1;
     }
     phy_sock.set_dest(ue_addr, ue_phy_port);
-    LOG_INFO("PHY_UDP_READY", {{"local_port", std::to_string(local_phy_port)},
-                                {"dest", ue_addr + ":" + std::to_string(ue_phy_port)}});
+    LOG_INFO(ev::PHY_UDP_READY, {{"local_port", std::to_string(local_phy_port)},
+                                  {"dest", ue_addr + ":" + std::to_string(ue_phy_port)}});
+
+    transport::UdpTransport cmd_sock;
+    const bool cmd_enabled = cmd_sock.bind("0.0.0.0", cmd_port);
+
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGTERM, on_signal);
 
     core::BsNode bs;
     bs.set_air_send([&](const std::vector<uint8_t>& bits) {
@@ -62,9 +76,11 @@ int main(int argc, char* argv[]) {
     uint32_t now_ms = monotonic_ms();
     bs.tick(now_ms);
     bs.start_broadcast();
-    LOG_INFO("BS_SIB_BROADCAST_ON", {{"period_ms", "200"}});
+    LOG_INFO(ev::BS_SIB_BROADCAST_ON, {{"period_ms", "200"}});
 
-    while (true) {
+    uint32_t next_heartbeat = now_ms + 5000;
+
+    while (!g_stop) {
         uint8_t rx_buf[65536];
         int rx_len = phy_sock.recv(rx_buf, sizeof(rx_buf), 10);
         if (rx_len > 0) {
@@ -73,8 +89,31 @@ int main(int argc, char* argv[]) {
                 bs.on_air_bits(phy::phy_rx_auto(iq, n_fft, cp_len));
             }
         }
-        bs.tick(monotonic_ms());
+
+        if (cmd_enabled) {
+            int cmd_len = cmd_sock.recv(rx_buf, sizeof(rx_buf) - 1, 0);
+            if (cmd_len > 0) {
+                rx_buf[cmd_len] = '\0';
+                std::string line(reinterpret_cast<char*>(rx_buf));
+                while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+                if (line == "status") {
+                    LOG_INFO(ev::BS_STATUS, {{"registered_ues",
+                                              std::to_string(bs.registered_ue_count())}});
+                } else if (line == "quit") {
+                    g_stop = 1;
+                }
+            }
+        }
+
+        now_ms = monotonic_ms();
+        bs.tick(now_ms);
+        if (static_cast<int32_t>(now_ms - next_heartbeat) >= 0) {
+            next_heartbeat = now_ms + 5000;
+            LOG_INFO(ev::HEARTBEAT, {{"registered_ues",
+                                      std::to_string(bs.registered_ue_count())}});
+        }
     }
 
+    LOG_INFO(ev::PROCESS_EXIT, {});
     return 0;
 }

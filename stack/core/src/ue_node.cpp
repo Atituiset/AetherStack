@@ -24,7 +24,7 @@ UeNode::UeNode(const UeNodeConfig& config) : config_(config), rng_(config.rng_se
             case mac::RachMsgType::MSG1_PRACH: frame_type = AirFrameType::MSG1_PRACH; break;
             case mac::RachMsgType::MSG3_RRC_REQ: frame_type = AirFrameType::MSG3_CCCH; break;
             default:
-                LOG_WARN("UE_RACH_TX_UNEXPECTED", {{"type", std::to_string(static_cast<int>(type))}});
+                LOG_WARN(ev::UE_RACH_TX_UNEXPECTED, {{"type", std::to_string(static_cast<int>(type))}});
                 return;
         }
         send_frame(frame_type, 0, pdu);
@@ -41,6 +41,7 @@ UeNode::UeNode(const UeNodeConfig& config) : config_(config), rng_(config.rng_se
                 timers_.cancel(rach_window_timer_);
                 rach_window_timer_running_ = false;
             }
+            schedule_attach_retry(); // fault recovery (M7.4): try again
         }
     });
 
@@ -76,7 +77,7 @@ void UeNode::attach() {
 void UeNode::maybe_start_attach() {
     if (!attach_requested_) return;
     if (!has_system_info()) {
-        LOG_INFO("UE_ATTACH_PENDING_SIB", {});
+        LOG_INFO(ev::UE_ATTACH_PENDING_SIB, {});
         return;
     }
     if (rach_ue_.state() != mac::RachState::IDLE ||
@@ -84,7 +85,7 @@ void UeNode::maybe_start_attach() {
         return; // procedure already in flight or connected
     }
 
-    LOG_INFO("UE_ATTACH_START", {{"imsi", config_.imsi}});
+    LOG_INFO(ev::UE_ATTACH_START, {{"imsi", config_.imsi}});
     pending_ccch_.clear();
     rrc_ue_.start_connection(); // fills pending_ccch_ via send callback
 
@@ -102,7 +103,7 @@ void UeNode::maybe_start_attach() {
 }
 
 void UeNode::abort_attach(const char* reason) {
-    LOG_ERROR("ATTACH_ABORT", {{"reason", reason}});
+    LOG_ERROR(ev::ATTACH_ABORT, {{"reason", reason}});
     attach_requested_ = false;
     attach_guard_running_ = false;
     pending_ccch_.clear();
@@ -114,7 +115,7 @@ void UeNode::abort_attach(const char* reason) {
 
 void UeNode::detach() {
     if (!registered()) {
-        LOG_WARN("UE_DETACH_IGNORED", {{"state", "not registered"}});
+        LOG_WARN(ev::UE_DETACH_IGNORED, {{"state", "not registered"}});
         return;
     }
     nas_ue_.send_detach();  // UL DCCH while C-RNTI is still cached
@@ -123,12 +124,12 @@ void UeNode::detach() {
     rach_ue_.force_idle();
     pending_ccch_.clear();
     attach_requested_ = false;
-    LOG_INFO("UE_DETACH_DONE", {});
+    LOG_INFO(ev::UE_DETACH_DONE, {});
 }
 
 void UeNode::send_app_data(const std::vector<uint8_t>& payload) {
     if (!registered()) {
-        LOG_WARN("APP_TX_NO_CONTEXT", {});
+        LOG_WARN(ev::APP_TX_NO_CONTEXT, {});
         return;
     }
     ++app_tx_seq_;
@@ -152,7 +153,7 @@ void UeNode::on_air_bits(const std::vector<uint8_t>& bits) {
     if (!unpack_air_bits(bits, bytes)) return;
     AirFrame frame;
     if (!decode_frame(bytes.data(), bytes.size(), frame)) {
-        LOG_WARN("AIR_FRAME_DECODE_FAIL", {{"len", std::to_string(bits.size())}});
+        LOG_WARN(ev::AIR_FRAME_DECODE_FAIL, {{"len", std::to_string(bits.size())}});
         return;
     }
     handle_air_frame(frame);
@@ -208,7 +209,7 @@ void UeNode::handle_sysinfo_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu) {
         sib1_ok_ = true;
         rrc_ue_.on_sib1_received(sib1);
     } else {
-        LOG_WARN("SYSINFO_DECODE_FAIL", {{"lcid", std::to_string(lcid)}});
+        LOG_WARN(ev::SYSINFO_DECODE_FAIL, {{"lcid", std::to_string(lcid)}});
         return;
     }
     maybe_start_attach(); // SIB-gated attach may now proceed
@@ -244,7 +245,7 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
                 auto it = app_tx_time_.find(seq);
                 if (it != app_tx_time_.end()) {
                     last_app_rtt_ms_ = static_cast<int64_t>(now_ms_) - it->second;
-                    LOG_INFO("APP_RTT", {{"seq", std::to_string(seq)},
+                    LOG_INFO(ev::APP_RTT, {{"seq", std::to_string(seq)},
                                           {"rtt_ms", std::to_string(last_app_rtt_ms_)}});
                     app_tx_time_.erase(it);
                 }
@@ -272,6 +273,26 @@ void UeNode::send_frame(AirFrameType type, uint16_t rnti,
     air_send_(pack_air_bits(encode_frame(frame)));
 }
 
+void UeNode::schedule_attach_retry() {
+    // A RACH attempt collapsed (RAR/CR timeout, retry budget exhausted).
+    // While the user still wants attach and the guard timer has not fired,
+    // reset the upper states and re-run the procedure after a short jitter.
+    if (!attach_requested_ || registered()) return;
+
+    std::uniform_int_distribution<uint32_t> dist(50, 200);
+    uint32_t delay = dist(rng_);
+    LOG_INFO(ev::ATTACH_RETRY, {{"delay_ms", std::to_string(delay)}});
+    timers_.schedule(delay, false, [this] {
+        if (!attach_requested_ || registered()) return;
+        if (rach_ue_.state() != mac::RachState::IDLE) return;
+        if (rrc_ue_.state() != rrc::UeState::IDLE) {
+            rrc_ue_.force_idle(); // silent local reset, pending_ccch_ is rebuilt
+        }
+        crnti_cache_ = 0;
+        maybe_start_attach();
+    });
+}
+
 void UeNode::schedule_rach_window_timer() {
     if (rach_window_timer_running_) {
         timers_.cancel(rach_window_timer_);
@@ -293,7 +314,7 @@ void UeNode::schedule_backoff_then_retry() {
     std::uniform_int_distribution<uint32_t> dist(config_.backoff_min_ms,
                                                  config_.backoff_max_ms);
     uint32_t delay = dist(rng_);
-    LOG_WARN("RACH_BACKOFF", {{"delay_ms", std::to_string(delay)}});
+    LOG_WARN(ev::RACH_BACKOFF, {{"delay_ms", std::to_string(delay)}});
     timers_.schedule(delay, false, [this] {
         if (rach_ue_.state() == mac::RachState::WAIT_RAR) {
             rach_ue_.on_rar_timeout(); // resends MSG1 or gives up -> IDLE

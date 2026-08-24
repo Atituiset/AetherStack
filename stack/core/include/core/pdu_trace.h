@@ -24,7 +24,7 @@ inline void trace_pdu(const char* layer, const char* direction,
         if (i + 1 < n) hex += ":";
     }
     if (bytes.size() > kMaxHexBytes) hex += ":...";
-    LOG_INFO("PDU_TRACE", {{"layer", layer},
+    LOG_INFO(ev::PDU_TRACE, {{"layer", layer},
                             {"direction", direction},
                             {"len", std::to_string(bytes.size())},
                             {"hex", hex},

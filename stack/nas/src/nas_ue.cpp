@@ -17,13 +17,13 @@ void NasUe::set_send_callback(SendCallback cb) { send_cb_ = std::move(cb); }
 void NasUe::transition(UeState new_state) {
     UeState old = state_;
     state_ = new_state;
-    LOG_INFO("NAS_STATE_CHANGE", {{"old", ue_state_str(old)},
+    LOG_INFO(ev::NAS_STATE_CHANGE, {{"old", ue_state_str(old)},
                                    {"new", ue_state_str(new_state)}});
 }
 
 void NasUe::send_attach_request(const std::string& imsi) {
     if (state_ != UeState::DEREGISTERED) {
-        LOG_WARN("NAS_ATTACH_REQ_IGNORED", {{"state", ue_state_str(state_)}});
+        LOG_WARN(ev::NAS_ATTACH_REQ_IGNORED, {{"state", ue_state_str(state_)}});
         return;
     }
     imsi_ = imsi;
@@ -38,12 +38,12 @@ void NasUe::send_attach_request(const std::string& imsi) {
     transition(UeState::REGISTERING);
 
     if (send_cb_) send_cb_(encoded);
-    LOG_INFO("NAS_ATTACH_REQUEST_TX", {{"imsi", imsi}});
+    LOG_INFO(ev::NAS_ATTACH_REQUEST_TX, {{"imsi", imsi}});
 }
 
 void NasUe::send_detach() {
     if (state_ == UeState::DEREGISTERED) {
-        LOG_WARN("NAS_DETACH_IGNORED", {{"state", ue_state_str(state_)}});
+        LOG_WARN(ev::NAS_DETACH_IGNORED, {{"state", ue_state_str(state_)}});
         return;
     }
 
@@ -60,7 +60,7 @@ void NasUe::send_detach() {
     transition(UeState::DEREGISTERED);
 
     if (send_cb_) send_cb_(encoded);
-    LOG_INFO("NAS_DETACH_TX", {{"tmsi", std::to_string(tmsi)}});
+    LOG_INFO(ev::NAS_DETACH_TX, {{"tmsi", std::to_string(tmsi)}});
 }
 
 void NasUe::force_deregistered() {
@@ -73,18 +73,18 @@ void NasUe::on_message(const std::vector<uint8_t>& pdu) {
     auto msg = NasMessage::decode(pdu);
     if (msg.msg_type == NasMessageType::ATTACH_ACCEPT) {
         if (state_ != UeState::REGISTERING) {
-            LOG_WARN("NAS_ACCEPT_IGNORED", {{"state", ue_state_str(state_)}});
+            LOG_WARN(ev::NAS_ACCEPT_IGNORED, {{"state", ue_state_str(state_)}});
             return;
         }
         if (msg.value.size() >= 4) {
             assigned_tmsi_ = msg.value[0] | (msg.value[1] << 8) |
                              (msg.value[2] << 16) | (msg.value[3] << 24);
         }
-        LOG_INFO("NAS_ATTACH_ACCEPT_RX", {{"tmsi", std::to_string(assigned_tmsi_)}});
+        LOG_INFO(ev::NAS_ATTACH_ACCEPT_RX, {{"tmsi", std::to_string(assigned_tmsi_)}});
         transition(UeState::REGISTERED);
     } else if (msg.msg_type == NasMessageType::ATTACH_REJECT) {
         if (state_ != UeState::REGISTERING) return;
-        LOG_WARN("NAS_ATTACH_REJECT_RX", {});
+        LOG_WARN(ev::NAS_ATTACH_REJECT_RX, {});
         transition(UeState::DEREGISTERED);
     }
 }

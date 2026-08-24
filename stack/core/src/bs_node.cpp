@@ -18,7 +18,7 @@ BsNode::BsNode(const BsNodeConfig& config) : config_(config) {
                 frame_type = AirFrameType::MSG4_CR;
                 break;
             default:
-                LOG_WARN("BS_RACH_TX_UNEXPECTED", {{"type", std::to_string(static_cast<int>(type))}});
+                LOG_WARN(ev::BS_RACH_TX_UNEXPECTED, {{"type", std::to_string(static_cast<int>(type))}});
                 return;
         }
         send_frame(frame_type, 0, pdu);
@@ -71,7 +71,7 @@ void BsNode::on_air_bits(const std::vector<uint8_t>& bits) {
     if (!unpack_air_bits(bits, bytes)) return;
     AirFrame frame;
     if (!decode_frame(bytes.data(), bytes.size(), frame)) {
-        LOG_WARN("AIR_FRAME_DECODE_FAIL", {{"len", std::to_string(bits.size())}});
+        LOG_WARN(ev::AIR_FRAME_DECODE_FAIL, {{"len", std::to_string(bits.size())}});
         return;
     }
     handle_air_frame(frame);
@@ -129,7 +129,7 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& pdu) {
             case mac::LCID_APP_DTCH: {
                 auto data = pdcp::rx(rlc::tm_rx(sdu));
                 trace_pdu("APP", "RX", "ping", data);
-                LOG_INFO("APP_ECHO_TX", {{"len", std::to_string(data.size())}});
+                LOG_INFO(ev::APP_ECHO_TX, {{"len", std::to_string(data.size())}});
                 downlink_send(rnti, mac::LCID_APP_DTCH, sdu); // loop back as-is
                 break;
             }

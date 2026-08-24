@@ -1,20 +1,9 @@
 import React, { useRef } from 'react'
+import ev, { MSC_UPLINK, MSC_DOWNLINK } from '../events'
 import { LogEvent } from '../hooks/useWebSocket'
 
 interface MscDiagramProps {
   messages: LogEvent[]
-}
-
-const EVENT_MSG_MAP: Record<string, { from: string; to: string; label: string }> = {
-  MAC_RACH_MSG1: { from: 'UE', to: 'BS', label: 'MSG1: PRACH' },
-  MAC_RACH_MSG2: { from: 'BS', to: 'UE', label: 'MSG2: RAR' },
-  MAC_RACH_MSG3: { from: 'UE', to: 'BS', label: 'MSG3: RRC Req' },
-  MAC_RACH_MSG4: { from: 'BS', to: 'UE', label: 'MSG4: CR' },
-  RRC_SETUP_REQUEST_TX: { from: 'UE', to: 'BS', label: 'RRC Setup Req' },
-  RRC_SETUP_TX: { from: 'BS', to: 'UE', label: 'RRC Setup' },
-  RRC_SETUP_COMPLETE_TX: { from: 'UE', to: 'BS', label: 'RRC Setup Cmpl' },
-  NAS_ATTACH_REQUEST: { from: 'UE', to: 'BS', label: 'NAS Attach Req' },
-  NAS_ATTACH_ACCEPT_TX: { from: 'BS', to: 'UE', label: 'NAS Attach Accept' },
 }
 
 const MAX_MESSAGES = 50
@@ -23,7 +12,7 @@ export const MscDiagram: React.FC<MscDiagramProps> = ({ messages }) => {
   const containerRef = useRef<HTMLDivElement>(null)
 
   const mscMessages = messages
-    .filter((m) => EVENT_MSG_MAP[m.event])
+    .filter((m) => MSC_UPLINK[m.event as keyof typeof MSC_UPLINK] || MSC_DOWNLINK[m.event as keyof typeof MSC_DOWNLINK])
     .slice(-MAX_MESSAGES)
 
   return (
@@ -36,14 +25,19 @@ export const MscDiagram: React.FC<MscDiagramProps> = ({ messages }) => {
           <div style={{ color: '#4b5563', fontStyle: 'italic', textAlign: 'center', marginTop: 40 }}>No MSC messages yet</div>
         ) : (
           mscMessages.map((msg, i) => {
-            const info = EVENT_MSG_MAP[msg.event]
-            const isRight = info.from === 'UE'
+            const label =
+              MSC_UPLINK[msg.event as keyof typeof MSC_UPLINK] ||
+              MSC_DOWNLINK[msg.event as keyof typeof MSC_DOWNLINK] ||
+              msg.event
+            const isUplink = !!MSC_UPLINK[msg.event as keyof typeof MSC_UPLINK]
             const time = msg.timestamp ? msg.timestamp.split('T')[1]?.replace('Z', '') : ''
+            const crnti = msg.fields?.c_rnti ? ` [${msg.fields.c_rnti}]` : ''
             return (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
+              <div key={`${msg._seq ?? i}-${msg.event}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
                 <span style={{ color: '#4b5563', width: 80, flexShrink: 0 }}>{time}</span>
-                <span style={{ color: isRight ? '#34d399' : '#60a5fa', width: 20, textAlign: 'center' }}>{isRight ? '→' : '←'}</span>
-                <span style={{ color: '#e5e7eb', fontWeight: 600 }}>{info.label}</span>
+                <span style={{ color: isUplink ? '#34d399' : '#60a5fa', width: 20, textAlign: 'center' }}>{isUplink ? '→' : '←'}</span>
+                <span style={{ color: '#e5e7eb', fontWeight: 600 }}>{label}{crnti}</span>
+                <span style={{ color: '#374151', marginLeft: 'auto', fontSize: 10 }}>{msg.module}</span>
               </div>
             )
           })
@@ -52,5 +46,8 @@ export const MscDiagram: React.FC<MscDiagramProps> = ({ messages }) => {
     </div>
   )
 }
+
+// keep the constant import referenced for consumers wanting raw lookup
+void ev
 
 export default MscDiagram

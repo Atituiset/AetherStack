@@ -1,6 +1,7 @@
 #ifndef AETHER_COMMON_LOGGER_H
 #define AETHER_COMMON_LOGGER_H
 
+#include "common/events.h"
 #include <cstdint>
 #include <map>
 #include <string>

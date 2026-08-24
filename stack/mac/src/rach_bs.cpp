@@ -26,7 +26,7 @@ void RachBs::on_prach_received(PreambleIndex preamble_idx) {
                                   static_cast<uint8_t>(ta & 0xFF),
                                   ul_grant};
     if (send_cb_) send_cb_(RachMsgType::MSG2_RAR, msg2);
-    LOG_INFO("MAC_RACH_MSG2", {{"ra_rnti", std::to_string(ra_rnti)},
+    LOG_INFO(ev::MAC_RACH_MSG2, {{"ra_rnti", std::to_string(ra_rnti)},
                                 {"preamble", std::to_string(preamble_idx)},
                                 {"ta", std::to_string(ta)}});
 }
@@ -34,7 +34,7 @@ void RachBs::on_prach_received(PreambleIndex preamble_idx) {
 void RachBs::on_msg3_received(RaRnti ra_rnti, const std::vector<uint8_t>& msg3_data) {
     auto it = ue_contexts_.find(ra_rnti);
     if (it == ue_contexts_.end()) {
-        LOG_WARN("MSG3_UNKNOWN_RA_RNTI", {{"ra_rnti", std::to_string(ra_rnti)}});
+        LOG_WARN(ev::MSG3_UNKNOWN_RA_RNTI, {{"ra_rnti", std::to_string(ra_rnti)}});
         return;
     }
 
@@ -46,10 +46,10 @@ void RachBs::on_msg3_received(RaRnti ra_rnti, const std::vector<uint8_t>& msg3_d
                                   static_cast<uint8_t>(crnti & 0xFF),
                                   static_cast<uint8_t>((crnti >> 8) & 0xFF)};
     if (send_cb_) send_cb_(RachMsgType::MSG4_CONTENTION_RESOLVE, msg4);
-    LOG_INFO("MAC_RACH_MSG4", {{"ra_rnti", std::to_string(ra_rnti)},
+    LOG_INFO(ev::MAC_RACH_MSG4, {{"ra_rnti", std::to_string(ra_rnti)},
                                 {"c_rnti", std::to_string(crnti)}});
     it->second.rach_complete = true;
-    LOG_INFO("RA_SUCCESS", {{"c_rnti", std::to_string(crnti)}});
+    LOG_INFO(ev::RA_SUCCESS, {{"c_rnti", std::to_string(crnti)}});
 
     // MSG3 may carry the CCCH PDU (e.g. RRC SetupRequest) after its header.
     if (msg3_data.size() > 3 && ccch_handler_) {

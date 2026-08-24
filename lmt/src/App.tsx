@@ -1,5 +1,6 @@
-import React, { useState, useCallback, useEffect } from 'react'
+import React, { useState, useCallback, useEffect, useMemo } from 'react'
 import useWebSocket, { LogEvent } from './hooks/useWebSocket'
+import ev from './events'
 import LogStream from './components/LogStream'
 import TopologyCanvas from './components/TopologyCanvas'
 import FsmViewer from './components/FsmViewer'
@@ -7,86 +8,95 @@ import MscDiagram from './components/MscDiagram'
 import PduDetail, { usePduStore, PduEntry } from './components/PduDetail'
 
 const MOCK_EVENTS: Partial<LogEvent>[] = [
-  { module: 'UE', level: 'INFO', event: 'PROCESS_START', fields: { msg: 'UE starting up' } },
-  { module: 'BS', level: 'INFO', event: 'PROCESS_START', fields: { msg: 'BS active on cell 1' } },
-  { module: 'UE', level: 'INFO', event: 'PHY_SYNC_REQ', fields: { freq: '3500MHz' } },
-  { module: 'BS', level: 'INFO', event: 'PHY_SYNC_DETECT', fields: { snr: '18.4dB' } },
-  { module: 'UE', level: 'INFO', event: 'MAC_RACH_MSG1', fields: { preamble: '42' } },
-  { module: 'BS', level: 'INFO', event: 'MAC_RACH_MSG2', fields: { rar: '0x43FA' } },
-  { module: 'UE', level: 'INFO', event: 'MAC_RACH_MSG3', fields: { crnti: '0x43FA' } },
-  { module: 'BS', level: 'INFO', event: 'MAC_RACH_MSG4', fields: { status: 'SUCCESS' } },
-  { module: 'UE', level: 'INFO', event: 'RRC_CONNECTED', fields: {} },
-  { module: 'UE', level: 'INFO', event: 'NAS_ATTACH_REQ', fields: { imsi: '460011234567890' } },
-  { module: 'BS', level: 'INFO', event: 'NAS_ATTACH_ACCEPT', fields: { tmsi: '0xC2841E3B' } },
-  { module: 'UE', level: 'INFO', event: 'HEARTBEAT', fields: { count: '1' } },
-  { module: 'BS', level: 'INFO', event: 'HEARTBEAT', fields: { ues: '1' } },
+  { module: 'UE', level: 'INFO', event: ev.PROCESS_START, fields: { msg: 'UE starting up' } },
+  { module: 'BS', level: 'INFO', event: ev.PROCESS_START, fields: { msg: 'BS active on cell 1' } },
+  { module: 'BS', level: 'INFO', event: ev.PHY_CONFIG, fields: { n_fft: '64', cp_len: '16' } },
+  { module: 'BS', level: 'INFO', event: ev.BS_SIB_BROADCAST_ON, fields: { period_ms: '200' } },
+  { module: 'UE', level: 'INFO', event: ev.RRC_MIB_RX, fields: { sfn: '0', bw: '50' } },
+  { module: 'UE', level: 'INFO', event: ev.RRC_SIB1_RX, fields: { plmn: '46001', tac: '1', cell_id: '1' } },
+  { module: 'UE', level: 'INFO', event: ev.UE_ATTACH_START, fields: { imsi: '460011234567890' } },
+  { module: 'UE', level: 'INFO', event: ev.MAC_RACH_MSG1, fields: { preamble: '42', tx_count: '1' } },
+  { module: 'BS', level: 'INFO', event: ev.MAC_RACH_MSG2, fields: { ra_rnti: '17194', ta: '12' } },
+  { module: 'UE', level: 'INFO', event: ev.RACH_SUCCESS, fields: { c_rnti: '1' } },
+  { module: 'BS', level: 'INFO', event: ev.RRC_SETUP_TX, fields: { c_rnti: '1' } },
+  { module: 'UE', level: 'INFO', event: ev.NAS_ATTACH_ACCEPT_RX, fields: { tmsi: '65537' } },
+  { module: 'UE', level: 'INFO', event: ev.APP_RTT, fields: { seq: '1', rtt_ms: '2' } },
+  { module: 'UE', level: 'INFO', event: ev.HEARTBEAT, fields: { registered: '1' } },
 ]
 
 type RightTab = 'logs' | 'msc' | 'pdu'
+
+type NodePresence = 'OFFLINE' | 'INITIALIZING' | 'RUNNING'
+
+/** Latest state per FSM derived from *_STATE_CHANGE field payloads (D6). */
+function deriveFsm(messages: LogEvent[]) {
+  let mac = 'IDLE'
+  let rrc = 'IDLE'
+  let nas = 'DEREGISTERED'
+  for (const m of messages) {
+    const next = m.fields?.new || m.fields?.new_state
+    if (!next) continue
+    if (m.module === 'UE') {
+      if (m.event === ev.MAC_STATE_CHANGE) mac = macLabel(next)
+      else if (m.event === ev.RRC_UE_STATE) rrc = next
+      else if (m.event === ev.NAS_STATE_CHANGE) nas = next
+    }
+  }
+  return { mac, rrc, nas }
+}
+
+/** Wire name -> FsmViewer display name. */
+function macLabel(state: string): string {
+  if (state === 'WAIT_CONTENTION_RESOLVE') return 'WAIT_CR'
+  return state
+}
 
 export const App: React.FC = () => {
   const { messages, isConnected, clearMessages, setMessages } = useWebSocket('ws://localhost:8765')
   const [mocking, setMocking] = useState(false)
   const [mockTimer, setMockTimer] = useState<ReturnType<typeof setInterval> | null>(null)
   const [rightTab, setRightTab] = useState<RightTab>('logs')
-  const { pdus, selectedPdu, setSelectedPdu, addPdu } = usePduStore()
+  const { pdus, selectedPdu, setSelectedPdu, addEvents } = usePduStore()
 
+  // Feed the PDU store only genuinely new events (server-side _seq).
   useEffect(() => {
-    messages.forEach(addPdu)
-  }, [messages, addPdu])
+    addEvents(messages)
+  }, [messages, addEvents])
 
-  const getState = (module: 'UE' | 'BS') => {
-    const logs = messages.filter((m) => m.module === module)
-    for (let i = logs.length - 1; i >= 0; i--) {
-      const e = logs[i].event
-      if (e === 'PROCESS_EXIT') return 'OFFLINE'
-      if (e === 'HEARTBEAT') return 'RUNNING'
-      if (e === 'NAS_ATTACH_ACCEPT' || e === 'RRC_CONNECTED') return 'REGISTERED'
-      if (e === 'PROCESS_START') return 'INITIALIZING'
+  const presence = useMemo((): Record<'UE' | 'BS', NodePresence> => {
+    const result: Record<'UE' | 'BS', NodePresence> = { UE: 'OFFLINE', BS: 'OFFLINE' }
+    for (const m of messages) {
+      if (m.module !== 'UE' && m.module !== 'BS') continue
+      if (m.event === ev.PROCESS_EXIT) result[m.module as 'UE' | 'BS'] = 'OFFLINE'
+      else if (m.event === ev.PROCESS_START) result[m.module as 'UE' | 'BS'] = 'RUNNING'
     }
-    return 'OFFLINE'
-  }
+    return result
+  }, [messages])
 
-  const getMacState = () => {
-    const logs = messages.filter((m) => m.module === 'UE')
-    for (let i = logs.length - 1; i >= 0; i--) {
-      const e = logs[i].event
-      if (e === 'MAC_RACH_MSG4') return 'CONNECTED'
-      if (e === 'MAC_RACH_MSG3') return 'WAIT_CR'
-      if (e === 'MAC_RACH_MSG2') return 'WAIT_RAR'
-      if (e === 'MAC_RACH_MSG1') return 'WAIT_RAR'
+  // Telemetry cards take real values from protocol events (D6).
+  const telemetry = useMemo(() => {
+    let phy = { n_fft: '-', cp_len: '-' }
+    let sib: { plmn: string; tac: string; cell_id: string } | null = null
+    let crnti = '-'
+    let appRx = '-'
+    for (const m of messages) {
+      if (m.event === ev.PHY_CONFIG && m.fields.n_fft) phy = { n_fft: m.fields.n_fft, cp_len: m.fields.cp_len ?? '-' }
+      else if (m.event === ev.RRC_SIB1_RX) sib = { plmn: m.fields.plmn ?? '-', tac: m.fields.tac ?? '-', cell_id: m.fields.cell_id ?? '-' }
+      else if (m.event === ev.UE_STATUS) {
+        if (m.fields.c_rnti && m.fields.c_rnti !== '0') crnti = m.fields.c_rnti
+        if (m.fields.app_rx) appRx = m.fields.app_rx
+      } else if (m.event === ev.RACH_SUCCESS && m.fields.c_rnti) {
+        if (crnti === '-') crnti = m.fields.c_rnti
+      }
     }
-    return 'IDLE'
-  }
+    return { phy, sib, crnti, appRx }
+  }, [messages])
 
-  const getRrcState = () => {
-    const logs = messages.filter((m) => m.module === 'UE')
-    for (let i = logs.length - 1; i >= 0; i--) {
-      const e = logs[i].event
-      if (e === 'RRC_CONNECTED' || e === 'NAS_ATTACH_ACCEPT') return 'CONNECTED'
-      if (e === 'MAC_RACH_MSG3') return 'CONNECTING'
-    }
-    return 'IDLE'
-  }
+  const fsm = deriveFsm(messages)
 
-  const getNasState = () => {
-    const logs = messages.filter((m) => m.module === 'UE')
-    for (let i = logs.length - 1; i >= 0; i--) {
-      const e = logs[i].event
-      if (e === 'NAS_ATTACH_ACCEPT') return 'REGISTERED'
-      if (e === 'NAS_ATTACH_REQ') return 'REGISTERING'
-    }
-    return 'DEREGISTERED'
-  }
-
-  const getLinkState = (): 'idle' | 'active' | 'error' => {
-    const ue = getState('UE')
-    const bs = getState('BS')
-    if (ue === 'OFFLINE' || bs === 'OFFLINE') return 'idle'
-    if (ue === 'REGISTERED' && bs === 'RUNNING') return 'active'
-    if (ue === 'INITIALIZING' || bs === 'INITIALIZING') return 'idle'
-    return 'idle'
-  }
+  const linkState = useMemo<'idle' | 'active'>(() => {
+    return fsm.nas === 'REGISTERED' ? 'active' : 'idle'
+  }, [fsm])
 
   const toggleMock = useCallback(() => {
     if (mocking) {
@@ -98,6 +108,7 @@ export const App: React.FC = () => {
 
     setMocking(true)
     let idx = 0
+    let seq = Date.now() % 100000 // mock _seq stream so the PDU store works offline
     const id = setInterval(() => {
       const raw = MOCK_EVENTS[idx % MOCK_EVENTS.length]
       const evt: LogEvent = {
@@ -106,6 +117,7 @@ export const App: React.FC = () => {
         level: raw.level || 'INFO',
         event: raw.event || 'EVENT',
         fields: raw.fields || {},
+        _seq: ++seq,
       }
       setMessages((prev) => [...prev, evt].slice(-200))
       idx++
@@ -113,12 +125,11 @@ export const App: React.FC = () => {
     setMockTimer(id)
   }, [mocking, mockTimer, setMessages])
 
-  const ueState = getState('UE')
-  const bsState = getState('BS')
-  const linkState = getLinkState()
+  const ueState = presence.UE
+  const bsState = presence.BS
 
   const nodeCard = (title: string, state: string, details: { label: string; value: string }[]) => (
-    <div style={{ ...cardStyle, borderColor: state === 'REGISTERED' || state === 'RUNNING' ? (title.includes('UE') ? '#10b981' : '#3b82f6') : 'var(--border-color)' }}>
+    <div style={{ ...cardStyle, borderColor: fsm.nas === 'REGISTERED' && title.includes('UE') ? '#10b981' : 'var(--border-color)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <span style={{ fontWeight: 700, fontSize: 13, color: '#fff' }}>{title}</span>
         <span style={{ fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4, textTransform: 'uppercase', background: state === 'OFFLINE' ? 'rgba(239,68,68,0.1)' : 'rgba(16,185,129,0.1)', color: state === 'OFFLINE' ? '#ef4444' : '#10b981' }}>
@@ -152,7 +163,7 @@ export const App: React.FC = () => {
     const layerColor: Record<string, string> = { MAC: '#3b82f6', RLC: '#8b5cf6', PDCP: '#10b981', RRC: '#f59e0b', NAS: '#ef4444', APP: '#6b7280' }
     return (
       <div key={p.id} onClick={() => setSelectedPdu(p)} style={{ display: 'flex', gap: 8, padding: '4px 0', fontSize: 12, cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center' }}>
-        <span style={{ color: '#4b5563', width: 75, flexShrink: 0, fontFamily: 'monospace', fontSize: 11 }}>{p.timestamp.split('T')[1]?.replace('Z', '')}</span>
+        <span style={{ color: '#4b5563', width: 75, flexShrink: 0, fontFamily: 'monospace', fontSize: 11 }}>#{p.seq}</span>
         <span style={{ color: layerColor[p.layer] || '#9ca3af', fontWeight: 700, width: 35 }}>{p.layer}</span>
         <span style={{ color: p.direction === 'TX' ? '#10b981' : '#3b82f6', fontWeight: 600, width: 24 }}>{p.direction}</span>
         <span style={{ color: '#e5e7eb', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.brief}</span>
@@ -198,14 +209,14 @@ export const App: React.FC = () => {
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {nodeCard('User Equipment (UE)', ueState, [
+              { label: 'C-RNTI', value: telemetry.crnti },
+              { label: 'App Rx (pong)', value: telemetry.appRx },
               { label: 'Modulation', value: 'QPSK (AWGN)' },
-              { label: 'Tx Power', value: '23 dBm' },
-              { label: 'Access', value: 'SISO 5G-NR MVP' },
             ])}
             {nodeCard('Base Station (gNB)', bsState, [
-              { label: 'Cell ID', value: '0x0001' },
-              { label: 'Bandwidth', value: '20 MHz' },
-              { label: 'Antennas', value: '1T1R (SISO)' },
+              { label: 'Cell ID', value: telemetry.sib?.cell_id ?? '0x0001' },
+              { label: 'PLMN / TAC', value: telemetry.sib ? `${telemetry.sib.plmn} / ${telemetry.sib.tac}` : '-' },
+              { label: 'FFT / CP', value: `${telemetry.phy.n_fft} / ${telemetry.phy.cp_len}` },
             ])}
           </div>
 
@@ -213,7 +224,7 @@ export const App: React.FC = () => {
             <h2 style={{ fontSize: 13, fontWeight: 800, color: 'var(--text-secondary)', letterSpacing: 1.5, marginBottom: 8, borderBottom: '1px solid var(--border-color)', paddingBottom: 8 }}>
               PROTOCOL FSM
             </h2>
-            <FsmViewer states={{ mac: getMacState(), rrc: getRrcState(), nas: getNasState() }} />
+            <FsmViewer states={{ mac: fsm.mac, rrc: fsm.rrc, nas: fsm.nas }} />
           </div>
         </section>
 

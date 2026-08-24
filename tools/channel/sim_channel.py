@@ -15,6 +15,7 @@ Physical-layer impairments (AWGN, fading) remain placeholders for Phase 1.
 
 import argparse
 import random
+import time
 import socket
 
 
@@ -74,6 +75,7 @@ def main():
         while True:
             relay(ul_ingress, args.bs_dest_port, "UPLINK  ")
             relay(dl_ingress, args.ue_dest_port, "DOWNLINK")
+            time.sleep(0.0005)  # avoid a busy spin between bursts
     except KeyboardInterrupt:
         print("\n[*] Channel Simulator terminated.")
     finally:

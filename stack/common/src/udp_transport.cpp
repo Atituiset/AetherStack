@@ -48,11 +48,18 @@ bool UdpTransport::send(const std::vector<uint8_t>& data) {
 }
 
 int UdpTransport::recv(uint8_t* buf, size_t buf_len, int timeout_ms) {
-    struct timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(sock_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    return recvfrom(sock_fd_, buf, buf_len, 0, nullptr, nullptr);
+    int flags = 0;
+    if (timeout_ms <= 0) {
+        // A zero SO_RCVTIMEO means "block forever" on Linux; make 0 an
+        // explicit non-blocking poll instead.
+        flags = MSG_DONTWAIT;
+    } else {
+        struct timeval tv{};
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(sock_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    return recvfrom(sock_fd_, buf, buf_len, flags, nullptr, nullptr);
 }
 
 }

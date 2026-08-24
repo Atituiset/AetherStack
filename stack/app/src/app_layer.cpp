@@ -14,7 +14,7 @@ void AppLayer::send_data(const std::vector<uint8_t>& data) {
         hex += buf;
         if (i + 1 < data.size() && i + 1 < 32) hex += ":";
     }
-    LOG_INFO("APP_DATA_TX", {{"seq", std::to_string(tx_count_)},
+    LOG_INFO(ev::APP_DATA_TX, {{"seq", std::to_string(tx_count_)},
                               {"len", std::to_string(data.size())},
                               {"hex", hex}});
     if (send_cb_) send_cb_(data);
@@ -30,7 +30,7 @@ void AppLayer::on_data_received(const std::vector<uint8_t>& data) {
         hex += buf;
         if (i + 1 < data.size() && i + 1 < 32) hex += ":";
     }
-    LOG_INFO("APP_DATA_RX", {{"seq", std::to_string(rx_count_)},
+    LOG_INFO(ev::APP_DATA_RX, {{"seq", std::to_string(rx_count_)},
                               {"len", std::to_string(data.size())},
                               {"hex", hex}});
 }

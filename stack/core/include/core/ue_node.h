@@ -81,6 +81,7 @@ private:
 
     void schedule_rach_window_timer();
     void schedule_backoff_then_retry();
+    void schedule_attach_retry();
 
     UeNodeConfig config_;
     mac::RachUe rach_ue_;

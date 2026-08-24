@@ -31,24 +31,24 @@ void RrcBs::handle_message(uint16_t rnti, const std::vector<uint8_t>& pdu) {
                        static_cast<uint8_t>((new_crnti >> 8) & 0xFF)};
         auto encoded = setup.encode();
         if (send_cb_) send_cb_(new_crnti, encoded);
-        LOG_INFO("RRC_SETUP_TX", {{"c_rnti", std::to_string(new_crnti)}});
+        LOG_INFO(ev::RRC_SETUP_TX, {{"c_rnti", std::to_string(new_crnti)}});
 
     } else if (msg.msg_type == RrcMessageType::SETUP_COMPLETE) {
         uint16_t crnti = rnti;
         auto it = ue_contexts_.find(crnti);
         if (it == ue_contexts_.end()) {
-            LOG_WARN("RRC_SETUP_COMPLETE_UNKNOWN", {{"c_rnti", std::to_string(crnti)}});
+            LOG_WARN(ev::RRC_SETUP_COMPLETE_UNKNOWN, {{"c_rnti", std::to_string(crnti)}});
             return;
         }
         it->second.state = UeState::CONNECTED;
-        LOG_INFO("RRC_SETUP_COMPLETE_RX", {{"c_rnti", std::to_string(crnti)}});
-        LOG_INFO("RRC_UE_CONNECTED", {{"c_rnti", std::to_string(crnti)}});
+        LOG_INFO(ev::RRC_SETUP_COMPLETE_RX, {{"c_rnti", std::to_string(crnti)}});
+        LOG_INFO(ev::RRC_UE_CONNECTED, {{"c_rnti", std::to_string(crnti)}});
 
     } else if (msg.msg_type == RrcMessageType::RELEASE) {
         auto it = ue_contexts_.find(rnti);
         if (it != ue_contexts_.end()) {
             it->second.state = UeState::IDLE;
-            LOG_INFO("RRC_UE_RELEASED", {{"c_rnti", std::to_string(rnti)}});
+            LOG_INFO(ev::RRC_UE_RELEASED, {{"c_rnti", std::to_string(rnti)}});
         }
     }
 }

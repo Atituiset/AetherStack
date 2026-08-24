@@ -6,6 +6,8 @@ export interface LogEvent {
   level: string
   event: string
   fields: Record<string, string>
+  /** Server-side monotonic sequence (added by log_server). */
+  _seq?: number
 }
 
 export function useWebSocket(url: string = 'ws://localhost:8765') {

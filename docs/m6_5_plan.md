@@ -89,9 +89,9 @@
 | T6 | UeNode/BsNode + 内存空口 E2E 测试 | attach→data→detach 全绿 | ✅ 完成（e2e_node_tests 5 例；修正先迁态后发送时序） |
 | T7 | ue/bs main 重写为薄壳 | 冒烟运行日志正确 | ✅ 完成（stdin 命令 attach/detach/send/status） |
 | T8 | sim_channel 重排端口 | 中继转发验证 | ✅ 完成（11001→BS, 21002→UE，中继日志确认） |
-| T9 | events.h/PDU_TRACE/log_server 背压+命令通道 | 单测/手工验证 | 🔴 未开始 |
-| T10 | LMT 对齐（events.ts/App/store/mock） | tsc 通过 | 🔴 未开始 |
-| T11 | e2e_smoke.py 跨进程冒烟脚本 | 一键跑通退出码 0 | 🔴 未开始 |
+| T9 | events.h/PDU_TRACE/log_server 背压+命令通道 | 单测/手工验证 | ✅ 完成（events.h 70 事件全量替换 ev:: 常量；log_server 有界队列背压+_seq+WS→UDP 命令转发；UE 10101/BS 10102 命令口；5s 心跳+PROCESS_EXIT） |
+| T10 | LMT 对齐（events.ts/App/store/mock） | tsc 通过 | ✅ 完成（events.ts 镜像+CI 校验；状态推导改用 *_STATE_CHANGE fields；PDU store 按 _seq 增量；遥测卡片取 PHY_CONFIG/RRC_SIB1_RX 真值） |
+| T11 | e2e_smoke.py 跨进程冒烟脚本 | 一键跑通退出码 0 | ✅ 完成（直连与 --channel 模式；UDP 命令驱动；15% 丢包下自愈重试） |
 
 ---
 
@@ -105,6 +105,24 @@
 - **RACH PDU 头**：MSG2/MSG3/MSG4 载荷自带 1 字节 RachMsgType 头，
   UeNode/BsNode 解析偏移以此为基准（air frame 的 [type][rnti:2] 头之外）。
 
+## T9–T11 实现备注
+
+- **事件目录**：`stack/common/include/common/events.h` 为单一事实来源，
+  全部发射点改用 `ev::<NAME>` 常量；`tools/scripts/check_events_sync.py`
+  校验 C++↔events.ts 镜像一致性并接入 CI（.github/workflows/ci.yml）。
+- **log_server 背压**：每 WS 客户端有界队列(512)，慢客户端丢旧保新并计数；
+  广播消息附服务端单调 `_seq`，LMT PDU store 按其增量处理。
+- **命令通道**：WS `{"target":"ue","cmd":"attach"}` → UDP 10101/10102。
+  注意 `UdpTransport::recv(timeout=0)` 语义已改为 MSG_DONTWAIT 非阻塞
+  （原零值 SO_RCVTIMEO 在 Linux 等于永久阻塞）。
+- **UE stdin EOF**：后台运行时管道关闭仅禁用 stdin 通道，进程不再误退出。
+- **logger 行刷新**：stdout 为行式遥测流，每次 LOG 后 flush，
+  否则全缓冲导致下游（smoke/log_server）长时间看不到事件。
+- **丢包自愈（M7.4 前置）**：RACH 在守卫窗口(3s)内塌陷时 UeNode 自动
+  重置 RRC 并按 50–200ms 抖动重跑附着（ATTACH_RETRY 事件）；
+  e2e_smoke 驱动层对 attach/ping/detach 另做应用级重试
+  （TM 承载无重传，单帧丢失由上层重试兜底）。
+
 ---
 
 ## 更新日志
@@ -114,3 +132,8 @@
   ue/bs main 薄壳化；sim_channel D3 端口拓扑 + start_demo.sh 接线；
   跨进程 UDP+PHY 冒烟验证 attach→data→detach 打通。
   剩余：T9（事件目录/背压）、T10（LMT 对齐）、T11（冒烟脚本）
+- `2026-08-24`: T9–T11 完成，M6.5 全部收尾。事件目录 70 项双端一致 + CI 校验；
+  log_server 背压/_seq/命令通道；LMT 状态推导与 PDU store 对齐真实事件流（tsc 通过）；
+  e2e_smoke 直连与信道(5%/15% 丢包)模式一键验证通过。
+  顺带修复：UdpTransport 零超时阻塞语义、UE stdin EOF 误退出、
+  logger stdout 全缓冲延迟、RACH 塌陷自愈重试。
