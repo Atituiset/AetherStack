@@ -6,7 +6,7 @@
 
 ### 功能
 
-- 单行 JSON 输出: `{"timestamp":"...","module":"UE","level":"INFO","event":"MAC_RACH_MSG1","fields":{...}}`
+- 单行 JSON 输出（每次写入即 flush——stdout 就是实时遥测流）: `{"timestamp":"...","module":"UE","level":"INFO","event":"MAC_RACH_MSG1","fields":{...}}`
 - ISO 8601 时间戳 (微秒精度)
 - 线程安全 (内部 `std::mutex`)
 - 可选 UDP 远程日志: 发送到 Log Server (port 9999)
@@ -39,6 +39,21 @@ namespace logging {
 logging::init("UE", "127.0.0.1", 9999);
 LOG_INFO("PROCESS_START", {{"msg", "UE starting up"}});
 LOG_WARN("RACH_RAR_TIMEOUT", {{"retry", "2"}});
+```
+
+---
+
+## 事件目录 (`common/events.h`, M6.5 D5)
+
+结构化日志的事件名**单一事实来源**——75 个常量按层分组并注释字段契约，
+所有发射点使用 `ev::<NAME>` 引用（禁止裸字符串）。镜像文件
+`lmt/src/events.ts` 由 CI 脚本 `tools/scripts/check_events_sync.py`
+强制一致。
+
+```cpp
+#include "common/events.h"
+LOG_INFO(ev::RACH_SUCCESS, {{"c_rnti", "1"}});   // ✓
+LOG_INFO("RACH_SUCCESS", ...);                   // ✗ CI 会抓出裸字面量漂移
 ```
 
 ---

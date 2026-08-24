@@ -88,3 +88,14 @@ PDU 十六进制详情查看器:
 | APP | #6b7280 (灰) |
 
 - 使用 `usePduStore` 自定义 hook 管理选中 PDU 状态
+
+---
+
+## DemoBanner (M8.3)
+
+演示模式横幅。从消息流读取最新 `module=DEMO / event=DEMO_PHASE`
+（fields: phase/title/progress/detail），渲染渐变进度条与阶段说明；
+done 后停留 8s 自动隐藏，无演示事件时零渲染。挂在 App header 与 main 之间。
+
+事件契约见 [演示系统](../demo/demo.md)；常量定义于 `lmt/src/events.ts`
+（与 C++ events.h 由 CI 脚本强制一致）。

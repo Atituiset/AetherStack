@@ -61,7 +61,7 @@ stack/
 | `user_plane_tests` | 4 |
 | `stack_tests` | 3 |
 
-总计: **63 个测试**
+总计: **93 个测试**（含内存空口 E2E；ASan 构建同套用例）
 
 ## Web LMT 构建
 

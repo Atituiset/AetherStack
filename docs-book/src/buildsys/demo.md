@@ -1,72 +1,49 @@
-# 演示运行
+# 构建与运行
 
-## 完整演示步骤
-
-### 1. 构建 C++ 协议栈
+## 构建
 
 ```bash
-make
+make                       # 等价: cmake -S . -B build && cmake --build build
+make test                  # 93 个用例 (gtest)
 ```
 
-### 2. 启动 Log Server
+### Sanitizer 构建 (M7.2)
 
 ```bash
-pip install websockets
-python tools/log_server/log_server.py
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DAETHER_SANITIZE=ON
+cmake --build build-asan -j"$(nproc)"
+(cd build-asan && ASAN_OPTIONS=detect_leaks=1 ctest)
 ```
 
-监听: UDP:9999 → WebSocket:8765
-
-### 3. 启动 Web LMT
+## 一键演示
 
 ```bash
-cd lmt && npm install && npm run dev
+./start_demo.sh                        # 交互模式
+./start_demo.sh --with-demo            # 无人值守剧本 + LMT 演示横幅
+./start_demo.sh --with-demo --loss-rate 0.05
 ```
 
-浏览器打开: `http://localhost:5173`
+启动顺序与就绪探测：构建检查 → venv → log server(9999) → channel →
+LMT(:3000) → BS(20002) → UE(10001)；`Ctrl+C` 触发防重入 cleanup。
 
-### 4. 启动 BS 端
+详见 [演示系统](../demo/demo.md)。
+
+## 手动分组件启动
 
 ```bash
-# Terminal 1: BS PHY 监听
-./build/bin/bs_phy 20002 10001
+.venv/bin/python3 tools/log_server/log_server.py &
+python3 tools/channel/sim_channel.py --loss-rate 0.05 &
+./build/bin/bs  --log-port 9999 --ue-phy-port 21002 &
+./build/bin/ue  --log-port 9999 --bs-phy-port 11001 &
 ```
 
-### 5. 启动 UE 端
+## 驱动 UE
+
+stdin（前台）或 UDP 命令口：
 
 ```bash
-# Terminal 2: UE PHY 连接 BS
-./build/bin/ue_phy 10001 20002
+echo attach      | nc -u -w1 127.0.0.1 10101
+echo "traffic on" | nc -u -w1 127.0.0.1 10101
 ```
 
-### 6. 观察结果
-
-在 LMT 中观察:
-- **TopologyCanvas**: UE 和 BS 之间的连接建立动画
-- **FsmViewer**: MAC/RRC/NAS 状态机逐步跳转
-- **MscDiagram**: 消息序列逐步出现
-- **LogStream**: 实时 JSON 日志流
-
-### 7. 可选: 信道模拟
-
-```bash
-# 在 UE 和 BS 之间插入信道模拟器
-python tools/channel/sim_channel.py \
-  --listen-port 30001 --dest-port 20002 --loss-rate 0.05 --delay-ms 2
-
-# UE 连接到信道模拟器而非 BS
-./build/bin/ue_phy 10001 30001
-```
-
-## 事后分析
-
-```bash
-# 生成 Mermaid 序列图
-python tools/scripts/generate_msc.py < log.json > sequence.mmd
-
-# PDU 逐层解码
-python tools/scripts/pdu_analyzer.py --hex "3c0a..." --layer mac
-
-# RTT 延迟统计
-python tools/scripts/latency_report.py < log.json
-```
+命令集：`attach` `detach` `send <text>` `traffic on|off` `stats` `status` `quit`。

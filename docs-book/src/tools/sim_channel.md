@@ -2,43 +2,44 @@
 
 位置: `tools/channel/sim_channel.py`
 
-## 功能
+## 拓扑 (D3)
 
-UDP 中继器，可配置丢包率和延迟，模拟无线信道条件。
+流量从专用入口进出信道，节点监听端口保持不变：
 
-## 使用方法
+```
+上行: UE ──► :11001 ──(loss/延迟)──► BS :20002
+下行: BS ──► :21002 ──(loss/延迟)──► UE :10001
+```
+
+## 参数
 
 ```bash
-python tools/channel/sim_channel.py [options]
+python3 tools/channel/sim_channel.py [options]
 
-选项:
-  --listen-port PORT    监听 UDP 端口 (默认 10000)
-  --dest-host HOST      转发目标地址 (默认 127.0.0.1)
-  --dest-port PORT      转发目标端口 (默认 20000)
-  --loss-rate RATE      丢包率 0.0-1.0 (默认 0.0)
-  --delay-ms MS         单向延迟 (毫秒, 默认 0)
-  --seed SEED           随机种子 (默认 42)
+--uplink-port 11000x     上行入口端口（默认 11001）
+--downlink-port PORT     下行入口端口（默认 21002）
+--bs-dest-port PORT      BS 实际监听端口（默认 20002）
+--ue-dest-port PORT      UE 实际监听端口（默认 10001）
+--loss-rate RATE         基础丢包率 [0,1]（默认 0）
+--latency SEC            人为延迟秒（默认 0）
+--blackout "600:10"      全断窗口 'start:dur,...'，自启动起算秒
+--loss-schedule "30:60:0.5,90:105:1.0"
+                         时变丢包曲线 'start:end:rate,...'，覆盖基础丢包率
 ```
 
 ## 示例
 
 ```bash
-# 无损中继
-python tools/channel/sim_channel.py --listen-port 10001 --dest-port 20001
+# 5% 丢包常载
+python3 tools/channel/sim_channel.py --loss-rate 0.05
 
-# 10% 丢包 + 5ms 延迟
-python tools/channel/sim_channel.py --loss-rate 0.1 --delay-ms 5
-
-# 双向: UE→BS 和 BS→UE 各一个实例
-python tools/channel/sim_channel.py --listen-port 10001 --dest-port 20001 &
-python tools/channel/sim_channel.py --listen-port 20002 --dest-port 10002 &
+# M7.4 场景: 30-60s 50% 丢包, 90-105s 全断
+python3 tools/channel/sim_channel.py \
+    --loss-schedule "30:60:0.5,90:105:1.0"
 ```
 
-## 工作原理
+## 行为细节
 
-1. 绑定 UDP 监听端口
-2. 收到数据报:
-   - 以 `loss_rate` 概率丢弃
-   - 否则等待 `delay_ms` 后转发到目标
-3. 使用 `threading.Timer` 实现延迟
-4. 使用固定随机种子保证可重复性
+* 每个方向独立掷骰子——**往返路径总丢失率 ≈ 1−(1−p)²**（5% 配置实测 ~10%）
+* 黑洞/时变窗判定使用单调时钟，与启动时刻对齐
+* 主循环带 0.5ms sleep，避免忙转；每行转发/丢弃日志 flush 输出

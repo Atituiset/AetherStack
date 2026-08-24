@@ -6,14 +6,17 @@
 |------|------|------|------|
 | 协议栈 | C++17 | GCC/Clang | PHY/MAC/RLC/PDCP/RRC/NAS/App 全部层实现 |
 | 构建系统 | CMake | ≥3.14 | 多目标构建，Google Test 集成 |
-| 测试框架 | Google Test | 1.14+ | 单元测试 + 集成测试，63 个用例 |
+| 测试框架 | Google Test | 1.12 | 单元 + 内存空口 E2E，93 个用例（常规+ASan 双构建全绿） |
+| Sanitizer | ASan + UBSan | GCC/Clang 内置 | `AETHER_SANITIZE=ON` 内存审计（M7.2） |
+| CI | GitHub Actions | - | 构建+ctest+事件目录一致性+LMT tsc/build |
 | 参考模型 | Python + NumPy | 3.12 | PHY 黄金参考，QPSK/OFDM/AWGN |
 | 日志桥接 | Python + asyncio + websockets | - | UDP→WebSocket，供 LMT 实时消费 |
 | 信道仿真 | Python + socket | - | UDP 中继，可配丢包率/延迟 |
 | 前端框架 | React | 18.2 | 组件化仪表盘 |
 | 前端语言 | TypeScript | 5.2 | 类型安全 |
 | 前端构建 | Vite | 5.0 | 快速 HMR 开发 + 生产构建 |
-| 分析脚本 | Python | 3.12 | MSC 生成、PDU 解析、RTT 统计 |
+| 分析脚本 | Python | 3.12 | MSC 生成、PDU 解析、RTT 统计、事件目录校验 |
+| 验证工具 | Python | 3.12 | 跨进程冒烟、故障恢复场景、30 分钟长跑框架 |
 
 ## 协议栈数据流
 
@@ -72,3 +75,14 @@ PHY (phy_tx/phy_rx + AWGN channel)
 ```
 
 日志通过 UDP 发送到 Log Server (port 9999)，再广播到 Web LMT (WebSocket port 8765)。
+
+## 控制面与可观测性平面
+
+```
+命令面:   操作者/LMT ──► UE :10101 / BS :10102 (attach/detach/traffic/stats)
+观测面:   节点 ──JSON/UDP:9999──► log_server ──WS:8765──► LMT / 工具
+事件契约: stack/common/include/common/events.h (75 项) ⇄ lmt/src/events.ts (CI 校验)
+```
+
+节点编排层 (`stack/core`, 见 [编排层](../stack/orchestration.md)) 是两侧的枢纽：
+对上暴露命令与统计，对下以显式时钟驱动全部层实体。

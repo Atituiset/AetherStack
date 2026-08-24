@@ -19,7 +19,9 @@ AetherStack 是一个**从零构建的 5G NR 无线协议栈 MVP**，覆盖从�
 | PDCP | 2 字节简化头透传 | ROHC, 加密, 完整性保护 |
 | RRC | MIB/SIB1 广播 + 连接建立/释放 | 测量报告, 切换, 重配 |
 | NAS | 简化附着 (IMSI 交换 + TMSI 分配) | 鉴权 AKA, PDU 会话, 安全模式 |
-| App | 简单 TX/RX + PDU trace 日志 | IP 路由, QoS |
+| App | 周期回环流量 + 序号/RTT/丢失统计 | IP 路由, QoS |
+| 编排 | UeNode/BsNode 全栈编排 + 故障自愈 | 多 UE, 切换 |
+| 交付 | 一键演示 + 无人剧本 + 三层验证工具 | 容器化, 硬件射频 |
 
 ## 目录结构
 

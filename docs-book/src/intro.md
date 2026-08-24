@@ -10,8 +10,9 @@ AetherStack 是一个教育/演示级 5G 无线协议栈实现，覆盖从物理
 - **双端可运行**：UE 和 BS 独立进程，UDP 仿真信道互连
 - **全链路可观测**：JSON 结构化日志 + Python MSC/PDU 分析脚本
 - **Web 监控终端**：React + TypeScript 实时 LMT（拓扑/FSM/MSC/PDU）
-- **63 个单元测试**：每层独立可测 + 全链路集成测试
-- **Git 里程碑标签**：M0–M6 每阶段可 `git checkout` 回溯
+- **一键演示**：`./start_demo.sh --with-demo` 无人值守全流程 + 演示横幅
+- **93 个测试用例**：每层单测 + 内存空口 E2E，常规与 ASan 双构建全绿
+- **Git 里程碑历史**：M0–M8 全部完成，计划书与技能卡片逐阶段沉淀
 
 ## 技术栈
 
