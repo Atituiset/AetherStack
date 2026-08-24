@@ -45,9 +45,21 @@ bool handle_command(const std::string& line, core::UeNode& ue) {
         ue.attach();
     } else if (line == "detach") {
         ue.detach();
+    } else if (line == "traffic" || line == "traffic on") {
+        ue.start_traffic();
+    } else if (line == "traffic off") {
+        ue.stop_traffic();
+        LOG_INFO(ev::UE_STATUS, {{"mac", std::to_string(static_cast<int>(ue.mac_state()))},
+                                  {"rrc", std::to_string(static_cast<int>(ue.rrc_state()))},
+                                  {"nas", std::to_string(static_cast<int>(ue.nas_state()))},
+                                  {"c_rnti", std::to_string(ue.crnti())},
+                                  {"sib", ue.has_system_info() ? "1" : "0"},
+                                  {"app_rx", std::to_string(ue.app_rx_count())}});
     } else if (line.rfind("send ", 0) == 0) {
         std::vector<uint8_t> payload(line.begin() + 5, line.end());
         ue.send_app_data(payload);
+    } else if (line == "stats") {
+        ue.emit_traffic_stats();
     } else if (line == "status") {
         LOG_INFO(ev::UE_STATUS, {{"mac", std::to_string(static_cast<int>(ue.mac_state()))},
                                   {"rrc", std::to_string(static_cast<int>(ue.rrc_state()))},
@@ -112,7 +124,7 @@ int main(int argc, char* argv[]) {
         phy_sock.send(phy::iq_to_bytes(iq));
     });
 
-    LOG_INFO(ev::UE_CMD_HINT, {{"cmd", "attach | detach | send <text> | status | quit"}});
+    LOG_INFO(ev::UE_CMD_HINT, {{"cmd", "attach | detach | send <text> | traffic | stats | status | quit"}});
 
     uint32_t now_ms = monotonic_ms();
     ue.tick(now_ms);

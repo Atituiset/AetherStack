@@ -17,6 +17,14 @@ else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# M7.2: address+UB sanitizers. Configure with
+#   cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DAETHER_SANITIZE=ON
+option(AETHER_SANITIZE "Build with AddressSanitizer + UBSan" OFF)
+if(AETHER_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 add_subdirectory(stack)
 
 enable_testing()

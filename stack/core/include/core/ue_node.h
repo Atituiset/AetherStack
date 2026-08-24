@@ -50,6 +50,13 @@ public:
     void detach();  // NAS detach + RRC release
     void send_app_data(const std::vector<uint8_t>& payload);
 
+    // Continuous user-plane loopback (M7.1): sends one small packet every
+    // traffic_interval_ms while registered. Stopped by stop_traffic(),
+    // detach() and attach aborts.
+    void start_traffic(uint32_t interval_ms = 100);
+    void stop_traffic();
+    bool traffic_running() const { return traffic_timer_ != 0; }
+
     // Observability
     mac::RachState mac_state() const { return rach_ue_.state(); }
     rrc::UeState rrc_state() const { return rrc_ue_.state(); }
@@ -59,7 +66,18 @@ public:
     bool has_system_info() const { return mib_ok_ && sib1_ok_; }
     uint32_t app_tx_count() const { return app_tx_seq_; }
     uint32_t app_rx_count() const { return app_rx_count_; }
+    uint32_t app_loss_count() const { return app_loss_count_; }
     int64_t last_app_rtt_ms() const { return last_app_rtt_ms_; }
+    // Aggregated RTT over the whole run (ms); count == answered pings.
+    uint32_t rtt_sample_count() const { return rtt_samples_; }
+    int64_t rtt_min_ms() const { return rtt_min_ms_; }
+    int64_t rtt_max_ms() const { return rtt_max_ms_; }
+    int64_t rtt_avg_ms() const {
+        return rtt_samples_ ? rtt_sum_ms_ / rtt_samples_ : -1;
+    }
+
+    // Emit one TRAFFIC_STATS line on demand (also used by the stats command).
+    void emit_traffic_stats();
 
 private:
     void handle_air_frame(const AirFrame& frame);
@@ -82,6 +100,7 @@ private:
     void schedule_rach_window_timer();
     void schedule_backoff_then_retry();
     void schedule_attach_retry();
+    void sweep_lost_pings();
 
     UeNodeConfig config_;
     mac::RachUe rach_ue_;
@@ -104,8 +123,16 @@ private:
 
     uint32_t app_tx_seq_ = 0;
     uint32_t app_rx_count_ = 0;
+    uint32_t app_loss_count_ = 0;
     int64_t last_app_rtt_ms_ = -1;
+    uint32_t rtt_samples_ = 0;
+    int64_t rtt_min_ms_ = INT64_MAX;
+    int64_t rtt_max_ms_ = 0;
+    int64_t rtt_sum_ms_ = 0;
     std::unordered_map<uint32_t, uint32_t> app_tx_time_; // seq -> tx ms
+    TimerId traffic_timer_ = 0;
+    TimerId loss_sweep_timer_ = 0;
+    TimerId stats_timer_ = 0;
 
     std::mt19937 rng_;
 };

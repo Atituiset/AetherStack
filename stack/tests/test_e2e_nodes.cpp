@@ -112,6 +112,65 @@ TEST(E2eNodes, ReattachAfterDetach) {
     EXPECT_EQ(link.ue.app_rx_count(), 1u);
 }
 
+TEST(E2eNodes, SustainedTrafficLoopbackNoLoss) {
+    Link link;
+    link.boot();
+    link.ue.attach();
+    ASSERT_TRUE(link.ue.registered());
+
+    // M7.1 DoD at simulated scale: 100ms interval; 5 virtual minutes.
+    link.ue.start_traffic(100);
+    EXPECT_TRUE(link.ue.traffic_running());
+    link.pump(300000);
+
+    link.ue.stop_traffic();
+    EXPECT_FALSE(link.ue.traffic_running());
+    EXPECT_EQ(link.ue.app_tx_count(), 3000u);  // 300000ms / 100ms
+    EXPECT_EQ(link.ue.app_rx_count(), 3000u);
+    EXPECT_EQ(link.ue.app_loss_count(), 0u);
+    EXPECT_GT(link.ue.rtt_sample_count(), 0u);
+    EXPECT_GE(link.ue.rtt_min_ms(), 0);
+}
+
+TEST(E2eNodes, TrafficSurvivesAirBlackout) {
+    Link link;
+    bool blackout = false;
+    int dropped = 0;
+    // Wrap the downlink so we can silence the channel on demand.
+    auto orig_send = [&link](const std::vector<uint8_t>& bits) {
+        link.ue.on_air_bits(bits);
+    };
+    link.bs.set_air_send([&](const std::vector<uint8_t>& bits) {
+        if (blackout) { ++dropped; return; }
+        orig_send(bits);
+    });
+
+    link.boot();
+    link.ue.attach();
+    ASSERT_TRUE(link.ue.registered());
+    uint16_t crnti = link.ue.crnti();
+
+    link.ue.start_traffic(50);
+    link.pump(1000);            // clean phase: 20 pings answered
+    uint32_t rx_before = link.ue.app_rx_count();
+    EXPECT_EQ(rx_before, 20u);
+
+    blackout = true;            // air goes dead for 2 s
+    link.pump(2000);
+    blackout = false;           // channel restored
+
+    link.pump(3500);            // resume + let the 3 s loss window expire
+
+    EXPECT_EQ(link.ue.mac_state(), mac::RachState::CONNECTED);
+    EXPECT_EQ(link.ue.rrc_state(), rrc::UeState::CONNECTED);
+    EXPECT_TRUE(link.ue.registered());
+    EXPECT_EQ(link.ue.crnti(), crnti);
+    EXPECT_GT(link.ue.app_rx_count(), rx_before);   // resumed after restore
+    // pings sent during the blackout are lost forever (TM, no retransmit)
+    EXPECT_EQ(link.ue.app_rx_count(), 90u);         // 20 pre + 70 post-restore
+    EXPECT_EQ(link.ue.app_loss_count(), 40u);       // the blackout phase
+}
+
 TEST(E2eNodes, AttachGuardTimeoutRecoversToIdle) {
     core::BsNode silent_bs; // never answers
     core::UeNodeConfig cfg;

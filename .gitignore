@@ -29,3 +29,4 @@ Thumbs.db
 # Claude local settings
 .claude/
 dist/
+build-asan/

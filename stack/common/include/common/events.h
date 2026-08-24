@@ -98,7 +98,14 @@ inline constexpr char APP_DATA_TX[] = "APP_DATA_TX";          // app layer {len}
 inline constexpr char APP_DATA_RX[] = "APP_DATA_RX";          // app layer {len}
 inline constexpr char APP_ECHO_TX[] = "APP_ECHO_TX";          // BS {len}
 inline constexpr char APP_RTT[] = "APP_RTT";                  // UE {seq, rtt_ms}
+inline constexpr char APP_LOSS[] = "APP_LOSS";                // UE {seq}: unanswered past 3s window
 inline constexpr char APP_TX_NO_CONTEXT[] = "APP_TX_NO_CONTEXT"; // UE {}
+
+// ---- Traffic loopback (M7.1) ------------------------------------------------
+inline constexpr char TRAFFIC_START[] = "TRAFFIC_START";      // UE {interval_ms}
+inline constexpr char TRAFFIC_STOP[] = "TRAFFIC_STOP";        // UE {}
+// Periodic aggregate: {tx, rx, loss, rtt_min, rtt_max, rtt_avg}
+inline constexpr char TRAFFIC_STATS[] = "TRAFFIC_STATS";
 
 // ---- PDU inspector --------------------------------------------------------
 // fields: {layer, direction(TX|RX), len, hex(capped 48B), brief}

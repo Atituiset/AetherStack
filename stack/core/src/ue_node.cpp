@@ -111,6 +111,7 @@ void UeNode::abort_attach(const char* reason) {
     rrc_ue_.force_idle();
     crnti_cache_ = 0;
     nas_ue_.force_deregistered();
+    stop_traffic();
 }
 
 void UeNode::detach() {
@@ -124,6 +125,7 @@ void UeNode::detach() {
     rach_ue_.force_idle();
     pending_ccch_.clear();
     attach_requested_ = false;
+    stop_traffic();
     LOG_INFO(ev::UE_DETACH_DONE, {});
 }
 
@@ -146,6 +148,67 @@ void UeNode::send_app_data(const std::vector<uint8_t>& payload) {
     trace_pdu("APP", "TX", "ping", framed);
     auto pdcp_pdu = pdcp::tx(rlc::tm_tx(framed));
     uplink_send(mac::LCID_APP_DTCH, pdcp_pdu);
+}
+
+void UeNode::start_traffic(uint32_t interval_ms) {
+    if (!registered()) {
+        LOG_WARN(ev::APP_TX_NO_CONTEXT, {});
+        return;
+    }
+    if (traffic_timer_ != 0) return; // already running
+
+    traffic_timer_ = timers_.schedule(interval_ms, true, [this, interval_ms] {
+        std::vector<uint8_t> payload(32);
+        for (size_t i = 0; i < payload.size(); ++i) {
+            payload[i] = static_cast<uint8_t>('A' + (i % 26));
+        }
+        send_app_data(payload);
+    });
+
+    if (loss_sweep_timer_ == 0) {
+        loss_sweep_timer_ = timers_.schedule(500, true, [this] { sweep_lost_pings(); });
+    }
+    if (stats_timer_ == 0) {
+        stats_timer_ = timers_.schedule(5000, true, [this] { emit_traffic_stats(); });
+    }
+    LOG_INFO(ev::TRAFFIC_START, {{"interval_ms", std::to_string(interval_ms)}});
+}
+
+void UeNode::stop_traffic() {
+    bool was_running = traffic_timer_ != 0;
+    for (TimerId* t : {&traffic_timer_, &loss_sweep_timer_, &stats_timer_}) {
+        if (*t != 0) {
+            timers_.cancel(*t);
+            *t = 0;
+        }
+    }
+    if (was_running) emit_traffic_stats();
+    if (was_running) LOG_INFO(ev::TRAFFIC_STOP, {});
+}
+
+void UeNode::sweep_lost_pings() {
+    // TM bearer: a ping unanswered well beyond any legitimate RTT is lost.
+    constexpr uint32_t kLossWindowMs = 3000;
+    for (auto it = app_tx_time_.begin(); it != app_tx_time_.end();) {
+        if (static_cast<int32_t>(now_ms_ - it->second) >=
+            static_cast<int32_t>(kLossWindowMs)) {
+            LOG_WARN(ev::APP_LOSS, {{"seq", std::to_string(it->first)}});
+            it = app_tx_time_.erase(it);
+            ++app_loss_count_;
+        } else {
+            ++it;
+        }
+    }
+}
+
+void UeNode::emit_traffic_stats() {
+    LOG_INFO(ev::TRAFFIC_STATS,
+             {{"tx", std::to_string(app_tx_seq_)},
+              {"rx", std::to_string(app_rx_count_)},
+              {"loss", std::to_string(app_loss_count_)},
+              {"rtt_min", std::to_string(rtt_min_ms_ == INT64_MAX ? -1 : rtt_min_ms_)},
+              {"rtt_max", std::to_string(rtt_max_ms_)},
+              {"rtt_avg", std::to_string(rtt_avg_ms())}});
 }
 
 void UeNode::on_air_bits(const std::vector<uint8_t>& bits) {
@@ -245,9 +308,13 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
                 auto it = app_tx_time_.find(seq);
                 if (it != app_tx_time_.end()) {
                     last_app_rtt_ms_ = static_cast<int64_t>(now_ms_) - it->second;
+                    app_tx_time_.erase(it);
+                    ++rtt_samples_;
+                    rtt_sum_ms_ += last_app_rtt_ms_;
+                    rtt_min_ms_ = std::min(rtt_min_ms_, last_app_rtt_ms_);
+                    rtt_max_ms_ = std::max(rtt_max_ms_, last_app_rtt_ms_);
                     LOG_INFO(ev::APP_RTT, {{"seq", std::to_string(seq)},
                                           {"rtt_ms", std::to_string(last_app_rtt_ms_)}});
-                    app_tx_time_.erase(it);
                 }
             }
             break;

@@ -36,7 +36,32 @@ def main():
     # Placeholder: SNR is not yet used for signal-level simulation
     parser.add_argument("--snr", type=float, default=99.0,
                         help="SNR in dB (placeholder for Phase 1)")
+    parser.add_argument("--blackout", type=str, default="",
+                        help="Drop-everything windows 'start:dur,start:dur' "
+                             "in seconds from launch, e.g. '30:5,120:10'")
+    parser.add_argument("--loss-schedule", type=str, default="",
+                        help="Time-varying loss 'start:end:rate,...' seconds "
+                             "from launch, e.g. '30:60:0.5' (overrides --loss-rate)")
     args = parser.parse_args()
+
+    blackout_windows = []
+    for spec in filter(None, args.blackout.split(",")):
+        start_s, dur_s = spec.split(":")
+        blackout_windows.append((float(start_s), float(dur_s)))
+
+    loss_windows = []
+    for spec in filter(None, args.loss_schedule.split(",")):
+        s, e, r = spec.split(":")
+        loss_windows.append((float(s), float(e), float(r)))
+
+    def in_blackout(now: float) -> bool:
+        return any(start <= now < start + dur for start, dur in blackout_windows)
+
+    def loss_at(now: float) -> float:
+        for s, e, r in loss_windows:
+            if s <= now < e:
+                return r
+        return args.loss_rate
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", 0))
@@ -57,20 +82,30 @@ def main():
     print(f"[*] Loss: {args.loss_rate*100:.1f}% | Latency: {args.latency}s | SNR: {args.snr}dB (placeholder)")
     print("=" * 60)
 
+    t0 = time.monotonic()
+
     def relay(ingress, dest_port, label):
         try:
             data, _ = ingress.recvfrom(65535)
         except BlockingIOError:
             return
-        if random.random() >= args.loss_rate:
+        if in_blackout(time.monotonic() - t0):
+            print(f"[Channel] BLACKOUT DROP {label}: {len(data)} bytes", flush=True)
+            return
+        if random.random() >= loss_at(time.monotonic() - t0):
             if args.latency > 0:
-                import time
                 time.sleep(args.latency)
             sock.sendto(data, ("127.0.0.1", dest_port))
             print(f"[Channel] RELAY {label}: {len(data)} bytes", flush=True)
         else:
             print(f"[Channel] DROP {label} : {len(data)} bytes", flush=True)
 
+    if blackout_windows or loss_windows:
+        wins = ", ".join(f"{s}s+{d}s" for s, d in blackout_windows)
+        print(f"[*] Blackout windows: {wins}", flush=True)
+    if loss_windows:
+        sched = ", ".join(f"{s}-{e}s@{r:.0%}" for s, e, r in loss_windows)
+        print(f"[*] Loss schedule: {sched}", flush=True)
     try:
         while True:
             relay(ul_ingress, args.bs_dest_port, "UPLINK  ")

@@ -86,7 +86,13 @@ export const ev = {
   APP_DATA_RX: 'APP_DATA_RX',
   APP_ECHO_TX: 'APP_ECHO_TX',
   APP_RTT: 'APP_RTT', // {seq, rtt_ms}
+  APP_LOSS: 'APP_LOSS', // {seq}
   APP_TX_NO_CONTEXT: 'APP_TX_NO_CONTEXT',
+
+  // Traffic loopback (M7.1)
+  TRAFFIC_START: 'TRAFFIC_START', // {interval_ms}
+  TRAFFIC_STOP: 'TRAFFIC_STOP',
+  TRAFFIC_STATS: 'TRAFFIC_STATS', // {tx, rx, loss, rtt_min, rtt_max, rtt_avg}
 
   // PDU inspector: fields {layer, direction, len, hex, brief}
   PDU_TRACE: 'PDU_TRACE',
