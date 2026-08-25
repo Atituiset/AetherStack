@@ -101,6 +101,12 @@ inline constexpr char HARQ_RETX[] = "HARQ_RETX";   // {proc, attempt, reason(nac
 inline constexpr char HARQ_DROP[] = "HARQ_DROP";   // {proc, attempts}: budget exhausted
 inline constexpr char HARQ_COMBINE[] = "HARQ_COMBINE"; // RX {proc}: chase merging
 
+// ---- RLC UM/AM (M13) --------------------------------------------------------
+inline constexpr char RLC_UM_GAP_SKIP[] = "RLC_UM_GAP_SKIP"; // {skipped}: reorder timeout
+inline constexpr char RLC_AM_STATUS_TX[] = "RLC_AM_STATUS_TX"; // {dir, nacks}
+inline constexpr char RLC_AM_RETX[] = "RLC_AM_RETX";           // {sn}
+inline constexpr char PDCP_MAC_FAIL[] = "PDCP_MAC_FAIL";       // {}: integrity check
+
 // ---- Attach orchestration -------------------------------------------------
 inline constexpr char UE_ATTACH_PENDING_SIB[] = "UE_ATTACH_PENDING_SIB"; // UE {}
 inline constexpr char UE_ATTACH_START[] = "UE_ATTACH_START"; // UE {imsi}

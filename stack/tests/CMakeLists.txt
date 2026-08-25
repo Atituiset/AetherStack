@@ -42,6 +42,8 @@ target_link_libraries(mac_tests PRIVATE
 
 add_executable(rlc_tests
     ../rlc/tests/test_rlc_tm.cpp
+    ../rlc/tests/test_rlc_um.cpp
+    ../rlc/tests/test_rlc_am.cpp
 )
 
 target_link_libraries(rlc_tests PRIVATE

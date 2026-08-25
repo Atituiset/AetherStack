@@ -7,6 +7,7 @@
 #include "core/timer_list.h"
 #include "mac/rach_bs.h"
 #include "nas/nas_bs.h"
+#include "rlc/rlc_am.h"
 #include "rrc/rrc_bs.h"
 #include <cstdint>
 #include <functional>
@@ -62,6 +63,10 @@ private:
         std::array<uint8_t, crypto::kKey256Size> up_key{};
         bool sec_on = false;
         uint64_t dl_seq = 0;
+        // M13: user-plane bearer in RLC AM. dl_am_tx feeds the downlink
+        // (echo path); ul_am_rx reassembles what the UE sends.
+        rlc::AmTx dl_am_tx;
+        rlc::AmRx ul_am_rx;
     };
     DlFlow& flow(uint16_t rnti);
 

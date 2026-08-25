@@ -7,6 +7,7 @@
 #include "core/timer_list.h"
 #include "mac/rach_ue.h"
 #include "nas/nas_ue.h"
+#include "rlc/rlc_am.h"
 #include "rrc/rrc_ue.h"
 #include <cstdint>
 #include <functional>
@@ -89,6 +90,7 @@ private:
     void handle_data_pdu(uint16_t rnti, const std::vector<uint8_t>& pdu);
     void handle_sysinfo_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu);
     void handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu);
+    void handle_pong(const std::vector<uint8_t>& data); // RTT accounting
 
     // Build a DATA air frame carrying one (lcid, sdu) and emit it.
     void uplink_send(uint8_t lcid, const std::vector<uint8_t>& sdu);
@@ -113,6 +115,10 @@ private:
     mac::RachUe rach_ue_;
     rrc::RrcUe rrc_ue_;
     nas::NasUe nas_ue_;
+    // M13: the user-plane bearer runs in RLC AM (ARQ). app_am_tx_ feeds the
+    // uplink; app_am_rx_dl_ reassembles downlink PDUs (echo path).
+    rlc::AmTx app_am_tx_;
+    rlc::AmRx app_am_rx_dl_;
     TimerList timers_;
 
     AirBitsSend air_send_;

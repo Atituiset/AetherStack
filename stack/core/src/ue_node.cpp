@@ -68,6 +68,10 @@ void UeNode::tick(uint32_t now_ms) {
     now_ms_ = std::max(now_ms, now_ms_);
     timers_.tick(now_ms_);
     pump_harq();
+    // M13: RLC AM liveness — probe-retransmit when unacked data sat silent.
+    for (const auto& pdu : app_am_tx_.tick(now_ms_)) {
+        uplink_send(mac::LCID_APP_DTCH, pdcp::tx(rlc::tm_tx(pdu)));
+    }
 }
 
 void UeNode::pump_harq() {
@@ -134,6 +138,8 @@ void UeNode::abort_attach(const char* reason) {
     stop_traffic();
     harq_tx_.reset();
     harq_rx_.reset();
+    app_am_tx_.reset();
+    app_am_rx_dl_.reset();
     up_sec_on_ = false;
     pdcp_seq_ = 0;
 }
@@ -152,6 +158,8 @@ void UeNode::detach() {
     stop_traffic();
     harq_tx_.reset();
     harq_rx_.reset();
+    app_am_tx_.reset();
+    app_am_rx_dl_.reset();
     up_sec_on_ = false;
     pdcp_seq_ = 0;
     LOG_INFO(ev::UE_DETACH_DONE, {});
@@ -174,8 +182,11 @@ void UeNode::send_app_data(const std::vector<uint8_t>& payload) {
     framed.insert(framed.end(), payload.begin(), payload.end());
 
     trace_pdu("APP", "TX", "ping", framed);
-    auto pdcp_pdu = pdcp::tx(rlc::tm_tx(framed));
-    uplink_send(mac::LCID_APP_DTCH, pdcp_pdu);
+    // M13: user plane rides RLC AM — segment, then wrap every PDU for the
+    // legacy transparent path below (unchanged MAC/PDCP framing).
+    for (const auto& am_pdu : app_am_tx_.tx(now_ms_, framed)) {
+        uplink_send(mac::LCID_APP_DTCH, pdcp::tx(rlc::tm_tx(am_pdu)));
+    }
 }
 
 void UeNode::start_traffic(uint32_t interval_ms) {
@@ -371,36 +382,35 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
             break;
         }
         case mac::LCID_APP_DTCH: {
-            std::vector<uint8_t> data;
+            std::vector<uint8_t> am_pdu;
             if (up_sec_on_) {
                 std::vector<uint8_t> inner;
                 if (!pdcp::unprotect(up_key_, sdu, inner)) {
                     LOG_WARN(ev::SEC_DECRYPT_FAIL, {{"layer", "APP"}});
                     break;
                 }
-                data = pdcp::rx(rlc::tm_rx(inner));
+                am_pdu = pdcp::rx(rlc::tm_rx(inner));
             } else {
-                data = pdcp::rx(rlc::tm_rx(sdu));
+                am_pdu = pdcp::rx(rlc::tm_rx(sdu));
             }
-            trace_pdu("APP", "RX", "pong", data);
-            if (data.size() >= 4) {
-                uint32_t seq = static_cast<uint32_t>(data[0]) |
-                               (static_cast<uint32_t>(data[1]) << 8) |
-                               (static_cast<uint32_t>(data[2]) << 16) |
-                               (static_cast<uint32_t>(data[3]) << 24);
-                auto it = app_tx_time_.find(seq);
-                if (it != app_tx_time_.end()) ++app_rx_count_; // dedupe retx
-                auto it2 = app_tx_time_.find(seq);
-                if (it != app_tx_time_.end()) {
-                    last_app_rtt_ms_ = static_cast<int64_t>(now_ms_) - it->second;
-                    app_tx_time_.erase(it);
-                    ++rtt_samples_;
-                    rtt_sum_ms_ += last_app_rtt_ms_;
-                    rtt_min_ms_ = std::min(rtt_min_ms_, last_app_rtt_ms_);
-                    rtt_max_ms_ = std::max(rtt_max_ms_, last_app_rtt_ms_);
-                    LOG_INFO(ev::APP_RTT, {{"seq", std::to_string(seq)},
-                                          {"rtt_ms", std::to_string(last_app_rtt_ms_)}});
-                }
+            // M13: the payload is an RLC AM data PDU; deliver whole SDUs.
+            auto am_out = app_am_rx_dl_.rx(am_pdu);
+            for (const auto& data : am_out.delivered) {
+                trace_pdu("APP", "RX", "pong", data);
+                handle_pong(data);
+            }
+            if (am_out.status_needed) {
+                auto status = app_am_rx_dl_.build_status();
+                LOG_INFO(ev::RLC_AM_STATUS_TX,
+                         {{"dir", "ul"}, {"nacks", std::to_string(status[2])}});
+                uplink_send(mac::LCID_RLC_STATUS, status);
+            }
+            break;
+        }
+        case mac::LCID_RLC_STATUS: {
+            // Retransmit whatever the BS reported missing (uplink AM).
+            for (const auto& pdu : app_am_tx_.on_status(now_ms_, sdu)) {
+                uplink_send(mac::LCID_APP_DTCH, pdcp::tx(rlc::tm_tx(pdu)));
             }
             break;
         }
@@ -419,6 +429,25 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
         default:
             break;
     }
+}
+
+void UeNode::handle_pong(const std::vector<uint8_t>& data) {
+    if (data.size() < 4) return;
+    uint32_t seq = static_cast<uint32_t>(data[0]) |
+                   (static_cast<uint32_t>(data[1]) << 8) |
+                   (static_cast<uint32_t>(data[2]) << 16) |
+                   (static_cast<uint32_t>(data[3]) << 24);
+    auto it = app_tx_time_.find(seq);
+    if (it != app_tx_time_.end()) ++app_rx_count_; // dedupe retx
+    if (it == app_tx_time_.end()) return;
+    last_app_rtt_ms_ = static_cast<int64_t>(now_ms_) - it->second;
+    app_tx_time_.erase(it);
+    ++rtt_samples_;
+    rtt_sum_ms_ += last_app_rtt_ms_;
+    rtt_min_ms_ = std::min(rtt_min_ms_, last_app_rtt_ms_);
+    rtt_max_ms_ = std::max(rtt_max_ms_, last_app_rtt_ms_);
+    LOG_INFO(ev::APP_RTT, {{"seq", std::to_string(seq)},
+                          {"rtt_ms", std::to_string(last_app_rtt_ms_)}});
 }
 
 void UeNode::uplink_send(uint8_t lcid, const std::vector<uint8_t>& sdu_in) {

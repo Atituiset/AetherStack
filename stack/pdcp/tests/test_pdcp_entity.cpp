@@ -8,6 +8,10 @@
 
 using namespace pdcp;
 
+namespace {
+constexpr size_t kSecHeaderSizeForTest = 9; // flags(1) + seq(8)
+}
+
 TEST(PdcpEntity, RoundTripPreservesData) {
     std::vector<uint8_t> sdu = {0x48, 0x65, 0x6C, 0x6C, 0x6F};
     auto pdu = tx(sdu);
@@ -57,10 +61,28 @@ TEST(PdcpSecurity, ProtectedFrameHidesPlaintext) {
     std::vector<uint8_t> out;
     ASSERT_TRUE(pdcp::unprotect(k, framed, out));
     EXPECT_EQ(out, secret);
-    // wrong key must NOT restore the plaintext
+    // wrong key fails the MAC-I check outright (integrity gate)
     std::array<uint8_t, crypto::kKey256Size> bad{};
     bad.fill(0x11);
     std::vector<uint8_t> out2;
-    ASSERT_TRUE(pdcp::unprotect(bad, framed, out2));
-    EXPECT_NE(out2, secret);
+    EXPECT_FALSE(pdcp::unprotect(bad, framed, out2));
+}
+
+TEST(PdcpSecurity, TamperedCiphertextFailsIntegrity) {
+    auto key = crypto::to_bytes("0123456789abcdef0123456789abcdef");
+    std::array<uint8_t, crypto::kKey256Size> k{};
+    std::copy(key.begin(), key.end(), k.begin());
+    auto secret = crypto::to_bytes("INTEGRITY-MATTERS");
+    auto framed = pdcp::protect(k, /*seq=*/1, secret);
+    ASSERT_TRUE(framed[0] & pdcp::kPdcpFlagIntegrity);
+
+    auto tampered = framed;
+    tampered[kSecHeaderSizeForTest] ^= 0xFF; // flip one ciphertext byte
+    std::vector<uint8_t> out;
+    EXPECT_FALSE(pdcp::unprotect(k, tampered, out));
+
+    // The untouched frame still verifies.
+    std::vector<uint8_t> ok;
+    ASSERT_TRUE(pdcp::unprotect(k, framed, ok));
+    EXPECT_EQ(ok, secret);
 }

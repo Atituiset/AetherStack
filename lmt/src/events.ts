@@ -87,6 +87,12 @@ export const ev = {
   // Link reliability (M9)
   HARQ_RETX: 'HARQ_RETX',
   HARQ_DROP: 'HARQ_DROP',
+
+  // RLC UM/AM + PDCP integrity (M13)
+  RLC_UM_GAP_SKIP: 'RLC_UM_GAP_SKIP',
+  RLC_AM_STATUS_TX: 'RLC_AM_STATUS_TX',
+  RLC_AM_RETX: 'RLC_AM_RETX',
+  PDCP_MAC_FAIL: 'PDCP_MAC_FAIL',
   HARQ_COMBINE: 'HARQ_COMBINE',
 
   // Attach orchestration

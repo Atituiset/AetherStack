@@ -102,6 +102,10 @@ void BsNode::pump_flows() {
             trace_pdu("HARQ", "TX", "retx", e.coded);
             send_frame(AirFrameType::DATA, rnti, e.coded);
         }
+        // M13: downlink AM liveness probe when the UE's STATUS went missing.
+        for (const auto& pdu : f.dl_am_tx.tick(now_ms_)) {
+            downlink_send(rnti, mac::LCID_APP_DTCH, pdcp::tx(rlc::tm_tx(pdu)));
+        }
         // Retransmitting blocks stay busy until acked or dropped; the
         // scheduler only pulls new blocks when capacity allows.
     }
@@ -234,7 +238,7 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                 break;
             }
             case mac::LCID_APP_DTCH: {
-                std::vector<uint8_t> data;
+                std::vector<uint8_t> am_pdu;
                 auto& rxf = flow(rnti);
                 if (rxf.sec_on) {
                     std::vector<uint8_t> inner;
@@ -242,16 +246,38 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                         LOG_WARN(ev::SEC_DECRYPT_FAIL, {{"layer", "APP"}});
                         break;
                     }
-                    data = pdcp::rx(rlc::tm_rx(inner));
+                    am_pdu = pdcp::rx(rlc::tm_rx(inner));
                 } else {
-                    data = pdcp::rx(rlc::tm_rx(sdu));
+                    am_pdu = pdcp::rx(rlc::tm_rx(sdu));
                 }
-                trace_pdu("APP", "RX", "ping", data);
-                LOG_INFO(ev::APP_ECHO_TX, {{"len", std::to_string(data.size())}});
-                // Loop back the decrypted application frame, re-wrapped like
-                // an uplink frame would be; downlink_send re-encrypts it.
-                auto wrapped = pdcp::tx(rlc::tm_tx(data));
-                downlink_send(rnti, mac::LCID_APP_DTCH, wrapped);
+                // M13: RLC AM data PDU — deliver whole SDUs and echo each
+                // through the downlink AM entity (downlink_send re-encrypts).
+                auto am_out = rxf.ul_am_rx.rx(am_pdu);
+                for (const auto& data : am_out.delivered) {
+                    trace_pdu("APP", "RX", "ping", data);
+                    LOG_INFO(ev::APP_ECHO_TX,
+                             {{"len", std::to_string(data.size())}});
+                    for (const auto& pdu :
+                         rxf.dl_am_tx.tx(now_ms_, data)) {
+                        downlink_send(rnti, mac::LCID_APP_DTCH,
+                                      pdcp::tx(rlc::tm_tx(pdu)));
+                    }
+                }
+                if (am_out.status_needed) {
+                    auto status = rxf.ul_am_rx.build_status();
+                    LOG_INFO(ev::RLC_AM_STATUS_TX,
+                             {{"dir", "dl"}, {"nacks", std::to_string(status[2])}});
+                    downlink_send(rnti, mac::LCID_RLC_STATUS, status);
+                }
+                break;
+            }
+            case mac::LCID_RLC_STATUS: {
+                // UE reports holes in our downlink AM stream: retransmit.
+                auto& sf = flow(rnti);
+                for (const auto& pdu : sf.dl_am_tx.on_status(now_ms_, sdu)) {
+                    downlink_send(rnti, mac::LCID_APP_DTCH,
+                                  pdcp::tx(rlc::tm_tx(pdu)));
+                }
                 break;
             }
             default:
