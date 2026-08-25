@@ -11,8 +11,13 @@
 | M4 | RRC 连接 + NAS 附着 + 全流程 | ✅ | `M4` | 10+4+2 |
 | M5 | 可观测性 + 用户面数据 | ✅ | `M5` | 4+3 |
 | M6 | Web LMT 核心功能 (4 组件) | ✅ | `M6` | - |
-| M7 | 稳定化: 数据回环 + 内存审计 + 异常恢复 | 📋 | - | - |
-| M8 | 演示: 一键启动 + 场景剧本 + 交付 | 📋 | - | - |
+| M7 | 稳定化: 数据回环 + 内存审计 + 异常恢复 | ✅ | `M7` | 93+ |
+| M8 | 演示: 一键启动 + 场景剧本 + 交付 | ✅ | `M8` | - |
+| M9–M11 | FEC/HARQ、小区搜索、调度器多 UE | ✅ | `M9`–`M11` | 见 ctest |
+| M12 | 安全: AKA 鉴权 + ChaCha20 加密 | ✅ | `M12` | - |
+| M13 | RLC UM/AM (分段+ARQ) + PDCP 完整性 | ✅ | `M13` | - |
+| M14 | 移动性: 测量报告/切换/寻呼/RLF 重建立 | ✅ | `M14` | 144 |
+| M15 | 核心网分离: AMF/UPF 实体与进程 | ✅ | `M15` | 144+smoke |
 
 ## 各阶段详细目标
 
@@ -78,3 +83,25 @@
 - BsNode 流表: 每 C-RNTI 独立 DL-HARQ/UL-HARQ/调度队列, 释放即销毁
 - 下行公平调度 (每 tick 每流一个新 TB); 上行 configured-grant 免调度
 - UE 共享介质正确性: DATA RNTI 过滤; MSG2/MSG4 仅在对应 RACH 状态消费
+
+### M12 — 安全: 鉴权与加密
+- HMAC-SHA256 AKA: HSS 注册 USIM 主键, AUTH_REQUEST(RAND)/RES 校验; 错密钥拒于 REGISTERED
+- 会话密钥 session_k = HMAC(K, RAND‖"up-enc"), 鉴权后交付 gNB
+- ChaCha20 (RFC 8439) 用户面机密性, PDCP flags bit0 加密位, nonce=seq
+
+### M13 — RLC UM/AM + PDCP 完整性
+- RLC AM: 发送窗 + 接收重排序窗, STATUS(ACK_SN+位图 NACK), T_poll 静默探测
+- 分段/重组 (T-PDU 上限); MAC-I 完整性
+
+### M14 — 移动性
+- 测量报告: SIB1 扩展 cell_id/plmn/tac; UE 按 SIB 强度上报邻区; 服务小区消失且邻区可闻才触发 HO
+- 切换: HoCoordinator(X2-like) 或 M15 AMF 仲裁; flow/AM 实体随迁, NAS 保持
+- 寻页: SIB 搭载 paging 记录; 空闲 UE 自动 service request
+- RLF: 专用下行静默超时 → 重建立(MSG3 携带请求) → 失败回退全量 attach
+
+### M15 — 核心网进程分离
+- stack/cn 新库: CnMessage 信封 + NG-like/GTP-U-like 消息族 + CnLink(InMemory 多 peer / UDP client-server)
+- Amf: HSS/AKA/TMSI/会话密钥迁出 gNB; Upf: 用户面锚点, PATH_SWITCH 路由
+- amfd/upfd 独立进程; bs --amf-addr --upf-addr 外部核心接线; 不接线保持旧行为
+- AMF 仲裁切换闭环 HO_REQUIRED→HO_COMMAND→HO_NOTIFY→HO_PREPARED→UE_CTX_RELEASE
+- 4 进程冒烟 tools/test_scripts/e2e_smoke_m15.py; gNB 重启后核心网状态存活
