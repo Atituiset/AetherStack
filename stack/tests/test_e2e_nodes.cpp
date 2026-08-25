@@ -4,6 +4,8 @@
 // ping-pong, detach and attach-guard fault recovery.
 #include "core/bs_node.h"
 #include "core/ue_node.h"
+#include "cn/amf.h"
+#include "cn/upf.h"
 #include "mac/mac_pdu.h"
 #include "rrc/rrc_messages.h"
 #include <gtest/gtest.h>
@@ -657,4 +659,214 @@ TEST(E2eNodes, ReestablishmentFallsBackToFullAttachAfterBlsRestart) {
     ue.send_app_data({'F', 'B', '1'});
     pump(80);
     EXPECT_GE(ue.app_rx_count(), 1u);
+}
+
+// ---- M15: core-network separation -------------------------------------------
+
+namespace {
+
+// gNB + external AMF/UPF entities wired over in-memory links. The embedded
+// NasBs and the local echo path are bypassed; NAS tunnels to the AMF and the
+// user plane terminates at the UPF anchor.
+struct CnLink {
+    core::BsNode bs;
+    cn::InMemoryCnLink amf_to_bs, bs_to_amf;
+    cn::InMemoryCnLink upf_to_bs, bs_to_upf;
+    cn::Amf amf{amf_to_bs};
+    cn::Upf upf{upf_to_bs};
+
+    CnLink() {
+        // gNB -> AMF carrier and back.
+        bs_to_amf.connect_to(&amf_to_bs);
+        // gNB -> UPF carrier and back.
+        bs_to_upf.connect_to(&upf_to_bs);
+
+        core::BsNode::CnEndpoints ep;
+        ep.amf = &bs_to_amf;
+        ep.upf = &bs_to_upf;
+        bs.attach_core(ep);
+
+        // UPF echo: downlink data bounces back to the UE (network-side ping).
+        upf.set_ul_sink([this](uint32_t tmsi, const std::vector<uint8_t>& pdu) {
+            upf.send_downlink(tmsi, pdu);
+        });
+    }
+};
+
+} // namespace
+
+TEST(E2eNodes, SeparatedCoreAttachAndUserPlane) {
+    // M15: attach with the control plane in the AMF and the user plane
+    // anchored at the UPF. The gNB must not use its embedded NasBs.
+    CnLink c;
+    core::UeNode ue;
+    ue.set_air_send([&](const std::vector<uint8_t>& b) { c.bs.on_air_bits(b); });
+    c.bs.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            c.bs.tick(clock);
+        }
+    };
+    pump(10);
+    c.bs.start_broadcast();
+    ue.attach();
+    for (int i = 0; i < 40 && !ue.registered(); ++i) pump(10);
+    ASSERT_TRUE(ue.registered());
+
+    // Registration lives in the AMF now.
+    EXPECT_GE(c.amf.registered_count(), 1u);
+    EXPECT_EQ(c.bs.registered_ue_count(), 1u);
+
+    // User plane: UL reaches the UPF, its echo comes back routed DL.
+    for (int i = 0; i < 3; ++i) {
+        ue.send_app_data({'N', '1', '5', static_cast<uint8_t>('0' + i)});
+        pump(40);
+    }
+    EXPECT_EQ(c.upf.session_count(), 1u);
+    EXPECT_EQ(ue.app_tx_count(), 3u);
+    EXPECT_EQ(ue.app_rx_count(), 3u);
+}
+
+TEST(E2eNodes, SeparatedCoreAuthenticatedAttach) {
+    // M12 semantics preserved through the split: subscriber key lives in the
+    // AMF's HSS, AUTH challenge/response crosses the NG link, and the session
+    // key is delivered to the gNB afterwards so user-plane crypto still works.
+    CnLink c;
+    core::UeNodeConfig ue_cfg;
+    const std::string imsi = "460017777777777";
+    ue_cfg.imsi = imsi;
+    core::UeNode ue(ue_cfg);
+
+    std::array<uint8_t, crypto::kKey256Size> usim_key{};
+    for (size_t i = 0; i < usim_key.size(); ++i) {
+        usim_key[i] = static_cast<uint8_t>(0x30 + i);
+    }
+    ue.nas().set_usim_key(usim_key);
+    c.amf.add_subscriber(imsi, usim_key); // HSS provisioning at the AMF
+
+    ue.set_air_send([&](const std::vector<uint8_t>& b) { c.bs.on_air_bits(b); });
+    c.bs.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            c.bs.tick(clock);
+        }
+    };
+    pump(10);
+    c.bs.start_broadcast();
+    ue.attach();
+    for (int i = 0; i < 60 && !ue.registered(); ++i) pump(10);
+    ASSERT_TRUE(ue.registered());
+    EXPECT_TRUE(ue.nas().authenticated());
+
+    // Session key reached the flow: encrypted round-trip via the UPF.
+    for (int i = 0; i < 4; ++i) {
+        ue.send_app_data({'K', 'E', 'Y', static_cast<uint8_t>('0' + i)});
+        pump(40);
+    }
+    EXPECT_EQ(ue.app_tx_count(), 4u);
+    EXPECT_EQ(ue.app_rx_count(), 4u);
+}
+
+TEST(E2eNodes, SeparatedCoreSurvivesBsRestartViaAnchor) {
+    // The point of the split: kill the gNB, bring up a fresh one — the AMF
+    // registration table survives, and the UPF keeps routing once the new
+    // gNB re-registers the UE's route.
+    // Shared carrier links: both gNB instances talk to the SAME AMF/UPF, so
+    // the UPF's downlink reaches whichever gNB is currently live.
+    cn::InMemoryCnLink amf_to_bs, bs_to_amf;
+    cn::InMemoryCnLink upf_to_bs, bs_to_upf;
+    cn::Amf amf{amf_to_bs}; // single AMF behind the shared link
+    cn::Upf upf{upf_to_bs};
+    upf.set_ul_sink([&](uint32_t tmsi, const std::vector<uint8_t>& pdu) {
+        upf.send_downlink(tmsi, pdu);
+    });
+    bs_to_amf.connect_to(&amf_to_bs);
+    bs_to_upf.connect_to(&upf_to_bs);
+
+    core::BsNodeConfig cfg;
+    cfg.cell_id = 1;
+    core::UeNodeConfig ue_cfg;
+    ue_cfg.radio_link_failure_ms = 200; // detect the outage, re-attach
+    core::UeNode ue(ue_cfg);
+
+    // Indirection so the UE's air_send lambda survives gNB replacement.
+    core::BsNode* live_bs = new core::BsNode(cfg);
+    bool air_alive = true;
+    ue.set_air_send([&](const std::vector<uint8_t>& b) {
+        if (live_bs && air_alive) live_bs->on_air_bits(b);
+    });
+    auto wire_dl = [&](core::BsNode& gnb) {
+        gnb.set_air_send([&](const std::vector<uint8_t>& b) {
+            if (air_alive) ue.on_air_bits(b);
+        });
+    };
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            if (live_bs && air_alive) live_bs->tick(clock);
+        }
+    };
+
+    core::BsNode::CnEndpoints ep;
+    ep.amf = &bs_to_amf;
+    ep.upf = &bs_to_upf;
+    wire_dl(*live_bs);
+    live_bs->attach_core(ep);
+    pump(10);
+    live_bs->start_broadcast();
+    ue.attach();
+    for (int i = 0; i < 40 && !ue.registered(); ++i) pump(10);
+    ASSERT_TRUE(ue.registered());
+    EXPECT_EQ(amf.registered_count(), 1u);
+
+    // gNB dies; AMF/UPF keep their state. Pump through the outage window so
+    // the UE's RLF watchdog fires against the silent air.
+    air_alive = false;
+    pump(500);
+    delete live_bs;
+    live_bs = nullptr;
+
+    // Fresh gNB instance takes over the same cell identity.
+    live_bs = new core::BsNode(cfg);
+    air_alive = true;
+    wire_dl(*live_bs); // rebind the DL capture to this instance
+    core::BsNode::CnEndpoints ep2;
+    ep2.amf = &bs_to_amf;
+    ep2.upf = &bs_to_upf;
+    live_bs->attach_core(ep2);
+    live_bs->start_broadcast();
+
+    // The UE is still CONNECTED to the dead context, so attach() alone is a
+    // no-op: pump until the RLF watchdog fires (NAS drops), re-establishment
+    // fails (fresh gNB has no AS context), and the fallback full attach
+    // restores REGISTERED + CONNECTED with fresh AS state.
+    bool dropped = false;
+    for (int i = 0; i < 400; ++i) {
+        pump(10);
+        if (!dropped && !ue.registered()) dropped = true;
+        if (dropped && ue.registered() &&
+            ue.rrc_state() == rrc::UeState::CONNECTED) {
+            break;
+        }
+    }
+    ASSERT_TRUE(dropped) << "RLF never deregistered the UE";
+    ASSERT_TRUE(ue.registered());
+    pump(200); // let any in-flight RLC/HARQ state settle
+
+    ue.send_app_data({'A', 'N', 'C', 'H'});
+    for (int i = 0; i < 8 && ue.app_rx_count() == 0u; ++i) pump(20);
+    EXPECT_GE(ue.app_rx_count(), 1u); // anchored data path restored
+
+    delete live_bs;
 }

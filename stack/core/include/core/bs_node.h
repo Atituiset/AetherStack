@@ -1,6 +1,7 @@
 #ifndef AETHER_CORE_BS_NODE_H
 #define AETHER_CORE_BS_NODE_H
 
+#include "cn/cn_link.h"
 #include "common/crypto.h"
 #include "core/harq.h"
 #include "core/radio_frames.h"
@@ -90,6 +91,23 @@ public:
     // respond with a service request (fresh attach).
     void page(const std::string& imsi) { paging_target_ = imsi; }
 
+    // ---- M15: core-network separation ----------------------------------------
+    // Wire the gNB to external AMF/UPF entities. When both links are set the
+    // embedded NasBs and the local user-plane echo are bypassed: NAS PDUs
+    // tunnel opaquely over UPLINK/DOWNLINK_NAS, and user-plane SDUs go to
+    // the UPF anchor (which routes downlink back). Leave unset for the
+    // legacy single-node behaviour (used by most tests).
+    struct CnEndpoints {
+        cn::CnLink* amf = nullptr;
+        cn::CnLink* upf = nullptr;
+        uint16_t gnb_cell = 1; // announced in NG_SETUP
+    };
+    // Must be called before any UE attaches. Performs NG_SETUP and installs
+    // the message handlers.
+    void attach_core(CnEndpoints ep);
+
+    bool core_separated() const { return cn_amf_ != nullptr; }
+
 private:
     // M11: per-UE downlink flow — its own HARQ entities and a queue the
     // round-robin scheduler drains. Uplink uses configured grants (each UE
@@ -117,6 +135,14 @@ private:
     void handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& pdu);
     void handle_ccch_sdu(uint16_t rnti, const std::vector<uint8_t>& sdu); // M14
     uint32_t tmsi_for_crnti(uint16_t crnti) const;                       // M14
+    // M15: NG/GTP-like core-network plumbing.
+    void cn_send_nas(uint32_t tmsi, uint16_t rnti,
+                     const std::vector<uint8_t>& nas_pdu);
+    void cn_send_uplink_data(uint32_t tmsi, uint16_t rnti,
+                             const std::vector<uint8_t>& data);
+    void handle_cn_message(const cn::CnMessage& msg);
+    void deliver_dl_nas(uint32_t tmsi, uint16_t rnti,
+                        const std::vector<uint8_t>& nas_pdu);
     void downlink_send(uint16_t rnti, uint8_t lcid, const std::vector<uint8_t>& sdu);
     void downlink_raw(uint16_t rnti, uint8_t lcid, const std::vector<uint8_t>& sdu);
     void schedule_downlink();   // round-robin: one new block per flow/tick
@@ -138,6 +164,11 @@ private:
     std::unordered_map<uint16_t, InitiatedHo> initiated_ho_;   // source side
     std::unordered_map<uint16_t, HoContext> ho_prepared_;      // target side
     uint16_t next_ho_crnti_ = 0x1001;           // HO allocations avoid RACH range
+
+    // M15: core-network separation state
+    cn::CnLink* cn_amf_ = nullptr;
+    cn::CnLink* cn_upf_ = nullptr;
+    bool ng_setup_ok_ = false;
 
     AirBitsSend air_send_;
     uint32_t now_ms_ = 0;

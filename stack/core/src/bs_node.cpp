@@ -80,6 +80,118 @@ BsNode::BsNode(const BsNodeConfig& config) : config_(config) {
 
 void BsNode::set_air_send(AirBitsSend send) { air_send_ = std::move(send); }
 
+// ---- M15: core-network separation -------------------------------------------
+
+void BsNode::attach_core(CnEndpoints ep) {
+    cn_amf_ = ep.amf;
+    cn_upf_ = ep.upf;
+    if (cn_amf_) {
+        cn_amf_->set_handler(
+            [this](const cn::CnMessage& m) { handle_cn_message(m); });
+        cn::CnMessage setup;
+        setup.msg_type = cn::MsgType::NG_SETUP;
+        cn::put16(setup.value, ep.gnb_cell);
+        cn_amf_->send(setup);
+    }
+    if (cn_upf_) {
+        // Both carriers deliver core->gNB messages through the same handler.
+        cn_upf_->set_handler(
+            [this](const cn::CnMessage& m) { handle_cn_message(m); });
+    }
+}
+
+void BsNode::handle_cn_message(const cn::CnMessage& msg) {
+    switch (msg.msg_type) {
+        case cn::MsgType::NG_SETUP_OK:
+            ng_setup_ok_ = true;
+            LOG_INFO(ev::NG_SETUP_RX, {{"result", "ok"}});
+            break;
+
+        case cn::MsgType::DOWNLINK_NAS: {
+            // {tmsi:4}{rnti:2}{len:2} ++ nas_pdu
+            if (msg.value.size() < 10) break;
+            const uint32_t tmsi = cn::get32(msg.value, 0);
+            uint16_t rnti = cn::get16(msg.value, 4);
+            auto it = tmsi_to_crnti_.find(tmsi);
+            if (it != tmsi_to_crnti_.end()) rnti = it->second;
+            else tmsi_to_crnti_[tmsi] = rnti; // AMF told us who this UE is
+            deliver_dl_nas(tmsi, rnti,
+                           std::vector<uint8_t>(msg.value.begin() + 8,
+                                                msg.value.end()));
+            break;
+        }
+
+        case cn::MsgType::SESSION_KEY: {
+            // {tmsi:4}{rnti:2} key(32) — arm user-plane security on the flow.
+            if (msg.value.size() < 6 + crypto::kKey256Size) break;
+            const uint32_t tmsi = cn::get32(msg.value, 0);
+            uint16_t rnti = cn::get16(msg.value, 4);
+            auto it = tmsi_to_crnti_.find(tmsi);
+            if (it != tmsi_to_crnti_.end()) rnti = it->second;
+            else tmsi_to_crnti_[tmsi] = rnti;
+            auto& f = flow(rnti);
+            std::copy(msg.value.begin() + 6, msg.value.end(), f.up_key.begin());
+            f.sec_on = true;
+            LOG_INFO(ev::SEC_ENABLED,
+                     {{"dir", "dl"}, {"rnti", std::to_string(rnti)}});
+            break;
+        }
+
+        case cn::MsgType::DL_DATA: {
+            // UPF-routed downlink user-plane data for one of our UEs.
+            if (msg.value.size() < 6) break;
+            const uint16_t rnti = cn::get16(msg.value, 4);
+            std::vector<uint8_t> data(msg.value.begin() + 6, msg.value.end());
+            auto& f = flow(rnti);
+            for (const auto& pdu : f.dl_am_tx.tx(now_ms_, data)) {
+                downlink_send(rnti, mac::LCID_APP_DTCH,
+                              pdcp::tx(rlc::tm_tx(pdu)));
+            }
+            break;
+        }
+
+        default:
+            break;
+    }
+}
+
+void BsNode::deliver_dl_nas(uint32_t /*tmsi*/, uint16_t rnti,
+                            const std::vector<uint8_t>& nas_pdu) {
+    auto wrapped = pdcp::tx(rlc::tm_tx(nas_pdu));
+    downlink_send(rnti, mac::LCID_NAS_DCCH, wrapped);
+}
+
+void BsNode::cn_send_nas(uint32_t tmsi, uint16_t rnti,
+                         const std::vector<uint8_t>& nas_pdu) {
+    if (!cn_amf_) return;
+    cn::CnMessage m;
+    if (tmsi == 0) {
+        // INITIAL_UE_MSG: first NAS from an unknown UE.
+        m.msg_type = cn::MsgType::INITIAL_UE_MSG;
+        cn::put16(m.value, rnti);
+    } else {
+        m.msg_type = cn::MsgType::UPLINK_NAS;
+        cn::put32(m.value, tmsi);
+        cn::put16(m.value, rnti);
+        m.value.push_back(static_cast<uint8_t>(nas_pdu.size() & 0xFF));
+        m.value.push_back(static_cast<uint8_t>((nas_pdu.size() >> 8) & 0xFF));
+    }
+    m.value.insert(m.value.end(), nas_pdu.begin(), nas_pdu.end());
+    cn_amf_->send(m);
+}
+
+void BsNode::cn_send_uplink_data(uint32_t tmsi, uint16_t rnti,
+                                 const std::vector<uint8_t>& data) {
+    if (!cn_upf_) return;
+    cn::CnMessage m;
+    m.msg_type = cn::MsgType::UL_DATA;
+    cn::put32(m.value, tmsi);
+    cn::put16(m.value, rnti);
+    m.value.insert(m.value.end(), data.begin(), data.end());
+    cn_upf_->send(m);
+}
+
+
 void BsNode::tick(uint32_t now_ms) {
     now_ms_ = std::max(now_ms, now_ms_);
     timers_.tick(now_ms_);
@@ -238,6 +350,21 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                     nas_pdu = pdcp::rx(rlc::tm_rx(sdu));
                 }
                 trace_pdu("NAS", "RX", "dcch", nas_pdu);
+                if (core_separated()) {
+                    // M15: NAS is opaque to the gNB — tunnel it to the AMF.
+                    const uint32_t tmsi = tmsi_for_crnti(rnti);
+                    cn_send_nas(tmsi, rnti, nas_pdu);
+                    auto decoded = nas::NasMessage::decode(nas_pdu);
+                    if (decoded.msg_type == nas::NasMessageType::DETACH) {
+                        for (auto it = tmsi_to_crnti_.begin();
+                             it != tmsi_to_crnti_.end();) {
+                            if (it->second == rnti) it = tmsi_to_crnti_.erase(it);
+                            else ++it;
+                        }
+                        flows_.erase(rnti);
+                    }
+                    break;
+                }
                 auto decoded = nas::NasMessage::decode(nas_pdu);
                 bool detach = decoded.msg_type == nas::NasMessageType::DETACH;
                 nas_bs_.handle_message(0, nas_pdu);
@@ -283,6 +410,14 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                 auto am_out = rxf.ul_am_rx.rx(am_pdu);
                 for (const auto& data : am_out.delivered) {
                     trace_pdu("APP", "RX", "ping", data);
+                    if (cn_upf_) {
+                        // M15: uplink bearer terminates at the UPF anchor.
+                        LOG_INFO(ev::APP_ECHO_TX,
+                                 {{"len", std::to_string(data.size())},
+                                  {"upf", "1"}});
+                        cn_send_uplink_data(tmsi_for_crnti(rnti), rnti, data);
+                        continue;
+                    }
                     LOG_INFO(ev::APP_ECHO_TX,
                              {{"len", std::to_string(data.size())}});
                     for (const auto& pdu :

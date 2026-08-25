@@ -99,6 +99,7 @@ python3 tools/test_scripts/stability_run.py --duration 1800 \
 | M11 | MAC scheduler and multi-UE support | ✅ |
 | M12 | Security: subscriber authentication (HMAC-SHA256) + user-plane confidentiality (ChaCha20) | ✅ |
 | M13 | RLC UM/AM: segmentation + reassembly, ARQ status/retx; PDCP integrity (MAC-I) | ✅ |
+| M14 | Mobility: measurement reports, handover, paging, RLF re-establishment | ✅ |
 
 Design documents per milestone live in [`docs/`](docs); rendered guides in
 [`docs-book/`](docs-book).

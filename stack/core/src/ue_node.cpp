@@ -324,7 +324,12 @@ void UeNode::handle_rach_payload(AirFrameType type, uint16_t /*rnti*/,
 }
 
 void UeNode::handle_data_pdu(uint16_t rnti, const std::vector<uint8_t>& payload) {
-    last_dl_ms_ = now_ms_; // any decoded frame is evidence of a live link (M14)
+    // M14/M15: only DEDICATED downlink proves the serving link is alive.
+    // SIB broadcasts keep arriving even when our connection context is gone
+    // (e.g. gNB restarted), so counting them would mask a real RLF.
+    if (rnti != mac::RNTI_BROADCAST) {
+        last_dl_ms_ = now_ms_;
+    }
     // DATA frames come in two flavours (M9): HARQ transport blocks (user
     // traffic) and legacy raw MAC PDUs (HARQ-ACK control). The magic byte
     // in the HARQ header tells them apart.

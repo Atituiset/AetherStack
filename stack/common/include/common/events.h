@@ -118,6 +118,9 @@ inline constexpr char RLF_DETECTED[] = "RLF_DETECTED";         // {crnti}
 inline constexpr char RRC_REEST_REQ_TX[] = "RRC_REEST_REQ_TX"; // {old_crnti}
 inline constexpr char RRC_REEST_OK[] = "RRC_REEST_OK";         // {old, new}
 inline constexpr char RRC_REEST_FAIL[] = "RRC_REEST_FAIL";     // {c_rnti}
+inline constexpr char NG_SETUP_RX[] = "NG_SETUP_RX";           // AMF {cell}
+inline constexpr char UPF_PATH_SWITCH[] = "UPF_PATH_SWITCH";   // UPF {tmsi, cell}
+inline constexpr char UPF_NO_ROUTE[] = "UPF_NO_ROUTE";         // UPF {tmsi}
 
 // ---- Attach orchestration -------------------------------------------------
 inline constexpr char UE_ATTACH_PENDING_SIB[] = "UE_ATTACH_PENDING_SIB"; // UE {}
