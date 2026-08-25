@@ -51,22 +51,51 @@ void BsNode::set_air_send(AirBitsSend send) { air_send_ = std::move(send); }
 void BsNode::tick(uint32_t now_ms) {
     now_ms_ = std::max(now_ms, now_ms_);
     timers_.tick(now_ms_);
-    pump_harq();
+    schedule_downlink();
 }
 
-void BsNode::pump_harq() {
-    for (auto& e : harq_tx_.poll_timeouts(now_ms_)) {
-        // Retransmissions go back to the flow's addressed UE; with a single
-        // active UE today the last uplink C-RNTI identifies it.
-        trace_pdu("HARQ", "TX", "retx", e.coded);
-        send_frame(AirFrameType::DATA, ul_crnti_, e.coded);
+BsNode::DlFlow& BsNode::flow(uint16_t rnti) {
+    auto it = flows_.find(rnti);
+    if (it == flows_.end()) {
+        it = flows_.emplace(rnti, DlFlow{}).first;
+    }
+    return it->second;
+}
+
+// Fair full pass: every connected flow may hand ONE new transport block to
+// its HARQ entity per tick. Uplink stays grant-free (configured grants in
+// 3GPP terms); only the shared downlink needs scheduling.
+void BsNode::schedule_downlink() {
+    pump_flows();
+    for (auto& [rnti, f] : flows_) {
+        if (f.queue.empty() || f.harq_tx.in_flight() >= 4) continue;
+        auto tb = std::move(f.queue.front());
+        f.queue.pop_front();
+        if (auto e = f.harq_tx.send(tb)) {
+            trace_pdu("MAC", "TX", "dl scheduled", e->coded);
+            send_frame(AirFrameType::DATA, rnti, e->coded);
+        } else {
+            f.queue.push_front(std::move(tb));
+        }
+    }
+}
+
+void BsNode::pump_flows() {
+    for (auto& [rnti, f] : flows_) {
+        for (auto& e : f.harq_tx.poll_timeouts(now_ms_)) {
+            trace_pdu("HARQ", "TX", "retx", e.coded);
+            send_frame(AirFrameType::DATA, rnti, e.coded);
+        }
+        // Retransmitting blocks stay busy until acked or dropped; the
+        // scheduler only pulls new blocks when capacity allows.
     }
 }
 
 void BsNode::send_ack(uint16_t to, const HarqRx::Result& res) {
     if (!res.need_feedback || to == 0 || to == mac::RNTI_BROADCAST) return;
     if (res.proc == 0x7F) return;
-    harq_tx_.advance(now_ms_);
+    auto& f = flow(to);
+    f.harq_tx.advance(now_ms_);
     downlink_raw(to, mac::LCID_HARQ_ACK,
                  {static_cast<uint8_t>(res.proc & 0x7F),
                   static_cast<uint8_t>(res.ack ? 1 : 0)});
@@ -126,8 +155,10 @@ void BsNode::handle_air_frame(const AirFrame& frame) {
 void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> pdu;
     if (is_harq_framed(payload)) {
-        auto res = harq_rx_.receive(payload);
-        send_ack(rnti, res);
+        // UE uplink transport block: decode on this flow's RX entity.
+        auto& rx_flow = flow(rnti);
+        auto res = rx_flow.harq_rx.receive(payload);
+        send_ack(rnti, res); // feedback for the UE's uplink block
         if (!res.delivered) return;
         pdu = std::move(res.mac_pdu);
     } else {
@@ -155,8 +186,7 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                         if (it->second == rnti) it = tmsi_to_crnti_.erase(it);
                         else ++it;
                     }
-                    harq_tx_.reset();
-                    harq_rx_.reset();
+                    flows_.erase(rnti); // tear down the UE's whole flow
                 }
                 break;
             }
@@ -164,10 +194,11 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                 // UE feedback for our downlink transport blocks.
                 if (sdu.size() < 2) break;
                 uint8_t proc = sdu[0] & 0x7F;
-                harq_tx_.advance(now_ms_);
+                auto& dl = flow(rnti).harq_tx;
+                dl.advance(now_ms_);
                 if (sdu[1]) {
-                    harq_tx_.on_ack(proc);
-                } else if (auto e = harq_tx_.on_nack(proc)) {
+                    dl.on_ack(proc);
+                } else if (auto e = dl.on_nack(proc)) {
                     trace_pdu("HARQ", "TX", "retx(nack)", e->coded);
                     send_frame(AirFrameType::DATA, rnti, e->coded);
                 }
@@ -189,10 +220,13 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
 void BsNode::downlink_send(uint16_t rnti, uint8_t lcid,
                            const std::vector<uint8_t>& sdu) {
     std::vector<uint8_t> pdu = mac::build_pdu({{lcid, sdu}});
-    trace_pdu("MAC", "TX", "dl data", pdu);
-    auto ev = harq_tx_.send(pdu);
-    if (!ev.has_value()) return; // processes busy: timeout path retries later
-    send_frame(AirFrameType::DATA, rnti, ev->coded);
+    trace_pdu("MAC", "TX", "dl enqueue", pdu);
+    auto& f = flow(rnti);
+    if (f.queue.size() >= config_.max_dl_queue_per_ue) {
+        f.queue.pop_front(); // backpressure: shed the oldest
+        ++f.dropped;
+    }
+    f.queue.push_back(std::move(pdu));
 }
 
 void BsNode::downlink_raw(uint16_t rnti, uint8_t lcid,

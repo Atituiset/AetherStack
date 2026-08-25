@@ -251,10 +251,23 @@ void UeNode::on_air_bits(const std::vector<uint8_t>& bits) {
 void UeNode::handle_air_frame(const AirFrame& frame) {
     switch (frame.type) {
         case AirFrameType::MSG2_RAR:
+            // Shared medium: only consume RAR while we are waiting for one.
+            if (rach_ue_.state() == mac::RachState::WAIT_RAR) {
+                handle_rach_payload(frame.type, frame.rnti, frame.payload);
+            }
+            break;
         case AirFrameType::MSG4_CR:
-            handle_rach_payload(frame.type, frame.rnti, frame.payload);
+            // Only a UE in contention resolution may claim the C-RNTI.
+            if (rach_ue_.state() == mac::RachState::WAIT_CONTENTION_RESOLVE) {
+                handle_rach_payload(frame.type, frame.rnti, frame.payload);
+            }
             break;
         case AirFrameType::DATA:
+            // Shared medium: ignore unicast bursts addressed to other UEs.
+            if (frame.rnti != crnti_cache_ &&
+                frame.rnti != mac::RNTI_BROADCAST) {
+                break;
+            }
             handle_data_pdu(frame.rnti, frame.payload);
             break;
         default: // MSG1/MSG3 are uplink-only; ignore on the UE side

@@ -73,3 +73,8 @@
 - Zadoff-Chu PSS 三根序列滑动相关: 符号定时 + NID2; 双能量归一化
 - 简化 SSS 完成六小区 PCI; DMRS(LCG-QPSK) LS 信道估计 + 逐子载波均衡
 - phy_preamble_burst/phy_tx_data 分离, 射频适配层拼接; 两径衰落均衡后 BER<1%
+
+### M11 — MAC 调度器与多 UE
+- BsNode 流表: 每 C-RNTI 独立 DL-HARQ/UL-HARQ/调度队列, 释放即销毁
+- 下行公平调度 (每 tick 每流一个新 TB); 上行 configured-grant 免调度
+- UE 共享介质正确性: DATA RNTI 过滤; MSG2/MSG4 仅在对应 RACH 状态消费
