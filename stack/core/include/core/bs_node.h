@@ -1,6 +1,7 @@
 #ifndef AETHER_CORE_BS_NODE_H
 #define AETHER_CORE_BS_NODE_H
 
+#include "common/crypto.h"
 #include "core/harq.h"
 #include "core/radio_frames.h"
 #include "core/timer_list.h"
@@ -46,6 +47,7 @@ public:
     bool ue_connected(uint16_t crnti) const { return rrc_bs_.is_ue_connected(crnti); }
     size_t registered_ue_count() const { return tmsi_to_crnti_.size(); }
     size_t active_flow_count() const { return flows_.size(); }
+    nas::NasBs& nas() { return nas_bs_; }   // test/provisioning access
 
 private:
     // M11: per-UE downlink flow — its own HARQ entities and a queue the
@@ -56,6 +58,10 @@ private:
         HarqRx harq_rx;
         std::deque<std::vector<uint8_t>> queue; // coded frames ready to air
         size_t enqueued = 0, dropped = 0;
+        // M12: user-plane confidentiality keyed after authenticated attach
+        std::array<uint8_t, crypto::kKey256Size> up_key{};
+        bool sec_on = false;
+        uint64_t dl_seq = 0;
     };
     DlFlow& flow(uint16_t rnti);
 

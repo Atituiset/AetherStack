@@ -1,6 +1,7 @@
 #ifndef AETHER_NAS_NAS_UE_H
 #define AETHER_NAS_NAS_UE_H
 
+#include "common/crypto.h"
 #include "nas/nas_messages.h"
 #include <cstdint>
 #include <functional>
@@ -29,6 +30,18 @@ public:
     const std::string& imsi() const { return imsi_; }
     uint32_t assigned_tmsi() const { return assigned_tmsi_; }
 
+    // M12: USIM master key (must match the operator database entry).
+    void set_usim_key(const std::array<uint8_t, crypto::kKey256Size>& k) {
+        usim_key_ = k;
+        has_usim_ = true;
+    }
+    // Session key derived after successful authentication; feeds the PDCP
+    // cipher on both ends.
+    const std::array<uint8_t, crypto::kKey256Size>& session_key() const {
+        return session_key_;
+    }
+    bool authenticated() const { return authenticated_; }
+
     void send_attach_request(const std::string& imsi);
     void send_detach();
     void on_message(const std::vector<uint8_t>& pdu);
@@ -44,6 +57,11 @@ private:
     std::string imsi_;
     uint32_t assigned_tmsi_ = 0;
     SendCallback send_cb_;
+    std::array<uint8_t, crypto::kKey256Size> usim_key_{};
+    std::array<uint8_t, crypto::kKey256Size> session_key_{};
+    bool has_usim_ = false;
+    bool authenticated_ = false; // network verified us (set on ATTACH_ACCEPT)
+    bool auth_pending_ = false;  // answered a challenge, awaiting the verdict
 };
 
 }

@@ -7,6 +7,7 @@
 #include "mac/mac_pdu.h"
 #include "rrc/rrc_messages.h"
 #include <gtest/gtest.h>
+#include <array>
 #include <random>
 
 namespace {
@@ -346,4 +347,89 @@ TEST(E2eNodes, TwoUesConcurrentAttachAndTraffic) {
     pump(60);
     EXPECT_EQ(ue2.app_rx_count(), rx2_before + 1);
     EXPECT_FALSE(bs.ue_connected(ue1.crnti()));
+}
+
+TEST(E2eNodes, AuthenticatedAttachWithEncryptedUserPlane) {
+    // M12: provision a subscriber (USIM key on the UE, same key in the HSS).
+    // Attach must include the AUTH challenge/response exchange, and the
+    // user plane must flow with PDCP confidentiality enabled.
+    core::BsNode bs;
+    core::UeNodeConfig ue_cfg;
+    ue_cfg.imsi = "460019999999999";
+    core::UeNode ue(ue_cfg);
+
+    std::array<uint8_t, crypto::kKey256Size> usim_key{};
+    for (size_t i = 0; i < usim_key.size(); ++i) {
+        usim_key[i] = static_cast<uint8_t>(0xA0 + i);
+    }
+    const std::string imsi = "460019999999999";
+    ue.nas().set_usim_key(usim_key);
+    bs.nas().add_subscriber(imsi, usim_key);
+
+    ue.set_air_send([&](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+    bs.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            bs.tick(clock);
+        }
+    };
+    pump(10);
+    bs.start_broadcast();
+    ue.attach();
+    for (int i = 0; i < 40 && !ue.registered(); ++i) pump(10);
+    ASSERT_TRUE(ue.registered());
+    EXPECT_TRUE(ue.nas().authenticated());
+
+    // Encrypted loopback.
+    for (int i = 0; i < 4; ++i) {
+        ue.send_app_data({'S', 'E', 'C', static_cast<uint8_t>('0' + i)});
+        pump(40);
+    }
+    EXPECT_EQ(ue.app_tx_count(), 4u);
+    EXPECT_EQ(ue.app_rx_count(), 4u);
+}
+
+TEST(E2eNodes, WrongUsimKeyIsRejected) {
+    // A UE presenting a key that does not match the HSS entry must fail
+    // authentication and never reach REGISTERED.
+    core::BsNode bs;
+    core::UeNodeConfig ue_cfg;
+    ue_cfg.imsi = "460018888888888";
+    ue_cfg.attach_guard_ms = 500; // short guard: the abort must fit the test
+    core::UeNode ue(ue_cfg);
+
+    std::array<uint8_t, crypto::kKey256Size> good{};
+    std::array<uint8_t, crypto::kKey256Size> bad{};
+    bad.fill(0x5E);
+    const std::string imsi = "460018888888888";
+    ue.nas().set_usim_key(bad);
+    bs.nas().add_subscriber(imsi, good);
+
+    ue.set_air_send([&](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+    bs.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            bs.tick(clock);
+        }
+    };
+    pump(10);
+    bs.start_broadcast();
+    ue.attach();
+    for (int i = 0; i < 40 && !ue.nas().authenticated(); ++i) pump(10);
+
+    // The BS rejected the bogus response; the UE stays unauthenticated and
+    // the guard timer eventually aborts the whole attach.
+    EXPECT_FALSE(ue.nas().authenticated());
+    for (int i = 0; i < 40 && ue.rrc_state() != rrc::UeState::IDLE; ++i) {
+        pump(20);
+    }
+    EXPECT_EQ(ue.rrc_state(), rrc::UeState::IDLE);
 }

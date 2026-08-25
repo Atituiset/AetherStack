@@ -134,6 +134,8 @@ void UeNode::abort_attach(const char* reason) {
     stop_traffic();
     harq_tx_.reset();
     harq_rx_.reset();
+    up_sec_on_ = false;
+    pdcp_seq_ = 0;
 }
 
 void UeNode::detach() {
@@ -150,6 +152,8 @@ void UeNode::detach() {
     stop_traffic();
     harq_tx_.reset();
     harq_rx_.reset();
+    up_sec_on_ = false;
+    pdcp_seq_ = 0;
     LOG_INFO(ev::UE_DETACH_DONE, {});
 }
 
@@ -343,13 +347,41 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
             break;
         }
         case mac::LCID_NAS_DCCH: {
-            auto nas_pdu = pdcp::rx(rlc::tm_rx(sdu));
+            // The protected frame carries the same legacy-wrapped PDCP
+            // payload as the clear path; decrypt first, then unwrap.
+            std::vector<uint8_t> nas_pdu;
+            if (up_sec_on_) {
+                std::vector<uint8_t> inner;
+                if (!pdcp::unprotect(up_key_, sdu, inner)) {
+                    LOG_WARN(ev::SEC_DECRYPT_FAIL, {{"layer", "NAS"}});
+                    break;
+                }
+                nas_pdu = pdcp::rx(rlc::tm_rx(inner));
+            } else {
+                nas_pdu = pdcp::rx(rlc::tm_rx(sdu));
+            }
             trace_pdu("NAS", "RX", "dcch", nas_pdu);
             nas_ue_.on_message(nas_pdu);
+            if (nas_ue_.state() == nas::UeState::REGISTERED &&
+                nas_ue_.authenticated() && !up_sec_on_) {
+                up_key_ = nas_ue_.session_key();
+                up_sec_on_ = true;
+                LOG_INFO(ev::SEC_ENABLED, {{"dir", "ul"}});
+            }
             break;
         }
         case mac::LCID_APP_DTCH: {
-            auto data = pdcp::rx(rlc::tm_rx(sdu));
+            std::vector<uint8_t> data;
+            if (up_sec_on_) {
+                std::vector<uint8_t> inner;
+                if (!pdcp::unprotect(up_key_, sdu, inner)) {
+                    LOG_WARN(ev::SEC_DECRYPT_FAIL, {{"layer", "APP"}});
+                    break;
+                }
+                data = pdcp::rx(rlc::tm_rx(inner));
+            } else {
+                data = pdcp::rx(rlc::tm_rx(sdu));
+            }
             trace_pdu("APP", "RX", "pong", data);
             if (data.size() >= 4) {
                 uint32_t seq = static_cast<uint32_t>(data[0]) |
@@ -389,9 +421,16 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
     }
 }
 
-void UeNode::uplink_send(uint8_t lcid, const std::vector<uint8_t>& sdu) {
+void UeNode::uplink_send(uint8_t lcid, const std::vector<uint8_t>& sdu_in) {
+    std::vector<uint8_t> sdu = sdu_in;
+    const bool ciphered =
+        up_sec_on_ && (lcid == mac::LCID_NAS_DCCH || lcid == mac::LCID_APP_DTCH);
+    if (ciphered) {
+        sdu = pdcp::protect(up_key_, pdcp_seq_, sdu);
+        ++pdcp_seq_;
+    }
     std::vector<uint8_t> pdu = mac::build_pdu({{lcid, sdu}});
-    trace_pdu("MAC", "TX", "ul data", pdu);
+    trace_pdu("MAC", "TX", ciphered ? "ul enc" : "ul data", pdu);
 
     auto ev = harq_tx_.send(pdu);
     if (!ev.has_value()) {

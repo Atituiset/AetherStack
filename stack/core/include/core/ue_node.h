@@ -2,6 +2,7 @@
 #define AETHER_CORE_UE_NODE_H
 
 #include "core/radio_frames.h"
+#include "common/crypto.h"
 #include "core/harq.h"
 #include "core/timer_list.h"
 #include "mac/rach_ue.h"
@@ -62,6 +63,7 @@ public:
     mac::RachState mac_state() const { return rach_ue_.state(); }
     rrc::UeState rrc_state() const { return rrc_ue_.state(); }
     nas::UeState nas_state() const { return nas_ue_.state(); }
+    nas::NasUe& nas() { return nas_ue_; }   // test/USIM provisioning access
     uint16_t crnti() const { return crnti_cache_; }
     bool registered() const { return nas_ue_.state() == nas::UeState::REGISTERED; }
     bool has_system_info() const { return mib_ok_ && sib1_ok_; }
@@ -135,6 +137,10 @@ private:
     int64_t rtt_max_ms_ = 0;
     int64_t rtt_sum_ms_ = 0;
     std::unordered_map<uint32_t, uint32_t> app_tx_time_; // seq -> tx ms
+    // M12 user-plane confidentiality (keyed after authenticated attach)
+    std::array<uint8_t, crypto::kKey256Size> up_key_{};
+    bool up_sec_on_ = false;
+    uint64_t pdcp_seq_ = 0;
     TimerId traffic_timer_ = 0;
     TimerId loss_sweep_timer_ = 0;
     TimerId stats_timer_ = 0;

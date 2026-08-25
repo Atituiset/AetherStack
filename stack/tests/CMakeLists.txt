@@ -10,6 +10,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(stack_tests
     example_test.cpp
+    ../tests/test_crypto.cpp
 )
 
 target_link_libraries(stack_tests PRIVATE

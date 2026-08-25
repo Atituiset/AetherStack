@@ -1,6 +1,9 @@
 #include "pdcp/pdcp_entity.h"
+#include "common/crypto.h"
 #include "rlc/rlc_tm.h"
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <array>
 #include <vector>
 
 using namespace pdcp;
@@ -39,4 +42,25 @@ TEST(PdcpEntity, PdcpRlcVerticalIntegration) {
     auto rlc_out = rlc::tm_rx(rlc_sdu);
     auto final_sdu = rx(rlc_out);
     EXPECT_EQ(final_sdu, original);
+}
+
+TEST(PdcpSecurity, ProtectedFrameHidesPlaintext) {
+    auto key = crypto::to_bytes("0123456789abcdef0123456789abcdef");
+    std::array<uint8_t, crypto::kKey256Size> k{};
+    std::copy(key.begin(), key.end(), k.begin());
+    std::vector<uint8_t> secret = crypto::to_bytes("TOPSECRET-PAYLOAD-TOPSECRET");
+    auto framed = pdcp::protect(k, /*seq=*/7, secret);
+    ASSERT_EQ(framed[0] & 0x01, 0x01);
+    // ciphertext must not contain the plaintext byte pattern anywhere
+    EXPECT_TRUE(std::search(framed.begin(), framed.end(), secret.begin(),
+                            secret.end()) == framed.end());
+    std::vector<uint8_t> out;
+    ASSERT_TRUE(pdcp::unprotect(k, framed, out));
+    EXPECT_EQ(out, secret);
+    // wrong key must NOT restore the plaintext
+    std::array<uint8_t, crypto::kKey256Size> bad{};
+    bad.fill(0x11);
+    std::vector<uint8_t> out2;
+    ASSERT_TRUE(pdcp::unprotect(bad, framed, out2));
+    EXPECT_NE(out2, secret);
 }

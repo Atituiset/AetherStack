@@ -86,6 +86,16 @@ inline constexpr char NAS_ACCEPT_IGNORED[] = "NAS_ACCEPT_IGNORED"; // UE {state}
 inline constexpr char NAS_ATTACH_REQ_IGNORED[] = "NAS_ATTACH_REQ_IGNORED"; // UE {state}
 inline constexpr char NAS_DETACH_IGNORED[] = "NAS_DETACH_IGNORED"; // UE {state}
 
+// ---- Security (M12) ---------------------------------------------------------
+inline constexpr char SEC_ENABLED[] = "SEC_ENABLED";     // {dir}
+inline constexpr char SEC_DECRYPT_FAIL[] = "SEC_DECRYPT_FAIL"; // {layer}
+inline constexpr char NAS_AUTH_CHALLENGE_TX[] = "NAS_AUTH_CHALLENGE_TX"; // {imsi,tmsi}
+inline constexpr char NAS_AUTH_RESPONSE_TX[] = "NAS_AUTH_RESPONSE_TX";   // {}
+inline constexpr char NAS_AUTH_OK[] = "NAS_AUTH_OK";           // {imsi}
+inline constexpr char NAS_AUTH_FAIL[] = "NAS_AUTH_FAIL";       // {tmsi}
+inline constexpr char NAS_AUTH_RESP_UNKNOWN[] = "NAS_AUTH_RESP_UNKNOWN";
+inline constexpr char NAS_AUTH_REQ_IGNORED[] = "NAS_AUTH_REQ_IGNORED"; // {state}
+
 // ---- Link reliability (M9 HARQ/FEC) ----------------------------------------
 inline constexpr char HARQ_RETX[] = "HARQ_RETX";   // {proc, attempt, reason(nack|timeout)}
 inline constexpr char HARQ_DROP[] = "HARQ_DROP";   // {proc, attempts}: budget exhausted

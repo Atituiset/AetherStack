@@ -27,6 +27,8 @@ void NasUe::send_attach_request(const std::string& imsi) {
         return;
     }
     imsi_ = imsi;
+    authenticated_ = false;
+    auth_pending_ = false;
 
     NasMessage msg;
     msg.msg_type = NasMessageType::ATTACH_REQUEST;
@@ -66,11 +68,40 @@ void NasUe::send_detach() {
 void NasUe::force_deregistered() {
     if (state_ == UeState::DEREGISTERED) return;
     assigned_tmsi_ = 0;
+    authenticated_ = false;
+    auth_pending_ = false;
     transition(UeState::DEREGISTERED);
 }
 
 void NasUe::on_message(const std::vector<uint8_t>& pdu) {
     auto msg = NasMessage::decode(pdu);
+    if (msg.msg_type == NasMessageType::AUTH_REQUEST) {
+        // M12: network authentication challenge during REGISTERING.
+        if (state_ != UeState::REGISTERING || !has_usim_ ||
+            msg.value.size() < 32) {
+            LOG_WARN(ev::NAS_AUTH_REQ_IGNORED,
+                     {{"state", ue_state_str(state_)}});
+            return;
+        }
+        std::vector<uint8_t> rand(msg.value.begin(),
+                                  msg.value.begin() + 32);
+        auto res = crypto::hmac_sha256(usim_key_, rand);
+
+        std::vector<uint8_t> kd = rand;
+        kd.insert(kd.end(), {'u', 'p', '-', 'e', 'n', 'c'});
+        session_key_ = crypto::hmac_sha256(usim_key_, kd);
+        // The UE cannot know on its own whether RES is correct; the verdict
+        // arrives implicitly with the ATTACH_ACCEPT.
+        auth_pending_ = true;
+
+        NasMessage resp;
+        resp.msg_type = NasMessageType::AUTH_RESPONSE;
+        resp.value.assign(res.begin(), res.end());
+        auto encoded = resp.encode();
+        LOG_INFO(ev::NAS_AUTH_RESPONSE_TX, {});
+        if (send_cb_) send_cb_(encoded);
+        return;
+    }
     if (msg.msg_type == NasMessageType::ATTACH_ACCEPT) {
         if (state_ != UeState::REGISTERING) {
             LOG_WARN(ev::NAS_ACCEPT_IGNORED, {{"state", ue_state_str(state_)}});
@@ -79,6 +110,10 @@ void NasUe::on_message(const std::vector<uint8_t>& pdu) {
         if (msg.value.size() >= 4) {
             assigned_tmsi_ = msg.value[0] | (msg.value[1] << 8) |
                              (msg.value[2] << 16) | (msg.value[3] << 24);
+        }
+        if (auth_pending_) {
+            authenticated_ = true; // the network accepted our RES
+            auth_pending_ = false;
         }
         LOG_INFO(ev::NAS_ATTACH_ACCEPT_RX, {{"tmsi", std::to_string(assigned_tmsi_)}});
         transition(UeState::REGISTERED);

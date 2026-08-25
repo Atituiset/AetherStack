@@ -41,8 +41,24 @@ BsNode::BsNode(const BsNodeConfig& config) : config_(config) {
         } else {
             tmsi_to_crnti_[tmsi] = ul_crnti_; // fresh accept for this UE
         }
-        auto pdcp_pdu = pdcp::tx(rlc::tm_tx(pdu));
-        downlink_send(crnti, mac::LCID_NAS_DCCH, pdcp_pdu);
+        // M12: an authenticated attach carries the session key out of the
+        // HSS emulation. The ATTACH_ACCEPT itself still goes in the clear;
+        // encryption switches on right after it has been queued.
+        const auto* new_key = nas_bs_.session_key(tmsi);
+        bool arm_sec = new_key != nullptr;
+        std::array<uint8_t, crypto::kKey256Size> key_copy{};
+        if (new_key) key_copy = *new_key;
+
+        auto wrapped = pdcp::tx(rlc::tm_tx(pdu));
+        downlink_send(crnti, mac::LCID_NAS_DCCH, wrapped);
+
+        if (arm_sec) {
+            auto& f = flow(crnti);
+            f.up_key = key_copy;
+            f.sec_on = true;
+            LOG_INFO(ev::SEC_ENABLED,
+                     {{"dir", "dl"}, {"rnti", std::to_string(crnti)}});
+        }
     });
 }
 
@@ -175,7 +191,20 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                 break;
             }
             case mac::LCID_NAS_DCCH: {
-                auto nas_pdu = pdcp::rx(rlc::tm_rx(sdu));
+                // The protected frame carries the same legacy-wrapped PDCP
+                // payload as the clear path; decrypt first, then unwrap.
+                std::vector<uint8_t> nas_pdu;
+                auto& rf = flow(rnti);
+                if (rf.sec_on) {
+                    std::vector<uint8_t> inner;
+                    if (!pdcp::unprotect(rf.up_key, sdu, inner)) {
+                        LOG_WARN(ev::SEC_DECRYPT_FAIL, {{"layer", "NAS"}});
+                        break;
+                    }
+                    nas_pdu = pdcp::rx(rlc::tm_rx(inner));
+                } else {
+                    nas_pdu = pdcp::rx(rlc::tm_rx(sdu));
+                }
                 trace_pdu("NAS", "RX", "dcch", nas_pdu);
                 auto decoded = nas::NasMessage::decode(nas_pdu);
                 bool detach = decoded.msg_type == nas::NasMessageType::DETACH;
@@ -205,10 +234,24 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                 break;
             }
             case mac::LCID_APP_DTCH: {
-                auto data = pdcp::rx(rlc::tm_rx(sdu));
+                std::vector<uint8_t> data;
+                auto& rxf = flow(rnti);
+                if (rxf.sec_on) {
+                    std::vector<uint8_t> inner;
+                    if (!pdcp::unprotect(rxf.up_key, sdu, inner)) {
+                        LOG_WARN(ev::SEC_DECRYPT_FAIL, {{"layer", "APP"}});
+                        break;
+                    }
+                    data = pdcp::rx(rlc::tm_rx(inner));
+                } else {
+                    data = pdcp::rx(rlc::tm_rx(sdu));
+                }
                 trace_pdu("APP", "RX", "ping", data);
                 LOG_INFO(ev::APP_ECHO_TX, {{"len", std::to_string(data.size())}});
-                downlink_send(rnti, mac::LCID_APP_DTCH, sdu); // loop back as-is
+                // Loop back the decrypted application frame, re-wrapped like
+                // an uplink frame would be; downlink_send re-encrypts it.
+                auto wrapped = pdcp::tx(rlc::tm_tx(data));
+                downlink_send(rnti, mac::LCID_APP_DTCH, wrapped);
                 break;
             }
             default:
@@ -218,10 +261,16 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
 }
 
 void BsNode::downlink_send(uint16_t rnti, uint8_t lcid,
-                           const std::vector<uint8_t>& sdu) {
-    std::vector<uint8_t> pdu = mac::build_pdu({{lcid, sdu}});
-    trace_pdu("MAC", "TX", "dl enqueue", pdu);
+                           const std::vector<uint8_t>& sdu_in) {
+    std::vector<uint8_t> sdu = sdu_in;
     auto& f = flow(rnti);
+    const bool ciphered =
+        f.sec_on && (lcid == mac::LCID_NAS_DCCH || lcid == mac::LCID_APP_DTCH);
+    if (ciphered) {
+        sdu = pdcp::protect(f.up_key, f.dl_seq++, sdu);
+    }
+    std::vector<uint8_t> pdu = mac::build_pdu({{lcid, sdu}});
+    trace_pdu("MAC", "TX", ciphered ? "dl enc" : "dl enqueue", pdu);
     if (f.queue.size() >= config_.max_dl_queue_per_ue) {
         f.queue.pop_front(); // backpressure: shed the oldest
         ++f.dropped;

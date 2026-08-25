@@ -22,9 +22,9 @@ and a Web-based Local Maintenance Terminal (LMT).
 |-------|--------------|
 | PHY | QPSK modulation + OFDM (Cooley-Tukey FFT, CP), IQ over UDP |
 | MAC | PDU mux/demux (LCID), full 4-step RACH contention procedure |
-| RLC / PDCP | Transparent-mode relay, transparent PDCP |
+| RLC / PDCP | Transparent-mode relay; optional ChaCha20 confidentiality on PDCP |
 | RRC | Connection setup/release state machines, MIB/SIB1 broadcast |
-| NAS | Attach request/accept, detach, TMSI assignment |
+| NAS | Attach request/accept, HMAC-SHA256 challenge/response authentication, detach, TMSI assignment |
 | App | User-plane ping-pong with sequence numbers and RTT accounting |
 
 **Orchestration layer** (`stack/core`): `UeNode` / `BsNode` own all layer
@@ -63,7 +63,7 @@ Commands: `attach` `detach` `send <text>` `traffic on|off` `stats` `status`.
 ## Tests & verification
 
 ```bash
-make test                       # 93 unit/E2E tests (gtest)
+make test                       # 125 unit/E2E tests (gtest)
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DAETHER_SANITIZE=ON \
   && cmake --build build-asan -j && (cd build-asan && ctest)   # ASan+UBSan
 python3 tools/scripts/check_events_sync.py      # event catalog C++<->TS mirror
@@ -94,6 +94,10 @@ python3 tools/test_scripts/stability_run.py --duration 1800 \
 | M6.5 | Cross-process end-to-end (nodes over real UDP+PHY), event catalog, command channels | ✅ |
 | M7 | Sustained loopback, ASan audit, 30-min stability, fault recovery | ✅ |
 | M8 | One-command demo launcher, unattended scenario, LMT demo banner | ✅ |
+| M9 | FEC + HARQ: forward error correction and retransmission | ✅ |
+| M10 | Cell search & synchronisation: PSS/SSS timing+PCI, DMRS channel estimation | ✅ |
+| M11 | MAC scheduler and multi-UE support | ✅ |
+| M12 | Security: subscriber authentication (HMAC-SHA256) + user-plane confidentiality (ChaCha20) | ✅ |
 
 Design documents per milestone live in [`docs/`](docs); rendered guides in
 [`docs-book/`](docs-book).
