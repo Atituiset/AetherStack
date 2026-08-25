@@ -107,6 +107,18 @@ inline constexpr char RLC_AM_STATUS_TX[] = "RLC_AM_STATUS_TX"; // {dir, nacks}
 inline constexpr char RLC_AM_RETX[] = "RLC_AM_RETX";           // {sn}
 inline constexpr char PDCP_MAC_FAIL[] = "PDCP_MAC_FAIL";       // {}: integrity check
 
+// ---- Mobility (M14) ---------------------------------------------------------
+inline constexpr char MEAS_REPORT_TX[] = "MEAS_REPORT_TX";     // {serving, n}
+inline constexpr char HO_TRIGGERED[] = "HO_TRIGGERED";         // {from_cell, to_cell}
+inline constexpr char HO_COMMAND_TX[] = "HO_COMMAND_TX";       // {cell, rnti}
+inline constexpr char HO_COMPLETE_RX[] = "HO_COMPLETE_RX";     // {cell, rnti}
+inline constexpr char PAGE_TX[] = "PAGE_TX";                   // {imsi}
+inline constexpr char PAGE_RX[] = "PAGE_RX";                   // {imsi}
+inline constexpr char RLF_DETECTED[] = "RLF_DETECTED";         // {crnti}
+inline constexpr char RRC_REEST_REQ_TX[] = "RRC_REEST_REQ_TX"; // {old_crnti}
+inline constexpr char RRC_REEST_OK[] = "RRC_REEST_OK";         // {old, new}
+inline constexpr char RRC_REEST_FAIL[] = "RRC_REEST_FAIL";     // {c_rnti}
+
 // ---- Attach orchestration -------------------------------------------------
 inline constexpr char UE_ATTACH_PENDING_SIB[] = "UE_ATTACH_PENDING_SIB"; // UE {}
 inline constexpr char UE_ATTACH_START[] = "UE_ATTACH_START"; // UE {imsi}

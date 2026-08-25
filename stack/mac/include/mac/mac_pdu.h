@@ -26,6 +26,7 @@ constexpr uint8_t LCID_NAS_DCCH = 1;
 constexpr uint8_t LCID_APP_DTCH = 2;
 constexpr uint8_t LCID_HARQ_ACK = 60; // 0x3C control: [proc][ack]
 constexpr uint8_t LCID_RLC_STATUS = 59; // 0x3B control: RLC AM STATUS PDU
+constexpr uint8_t LCID_PAGING = 58; // 0x3A control: paging record (IMSI)
 constexpr uint8_t LCID_SIB1 = 61; // 0x3D
 constexpr uint8_t LCID_MIB = 62;  // 0x3E
 constexpr uint8_t LCID_PADDING = 63; // 0x3F

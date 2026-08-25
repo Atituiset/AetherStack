@@ -37,6 +37,24 @@ public:
         keys_[imsi] = k;
     }
 
+    // M14: handover support — move a registration between cells.
+    void adopt_ue(uint32_t tmsi, const std::string& imsi,
+                  const std::array<uint8_t, crypto::kKey256Size>& session_k) {
+        UeContext ctx;
+        ctx.imsi = imsi;
+        ctx.tmsi = tmsi;
+        ctx.registered = true;
+        ue_contexts_[tmsi] = ctx;
+        if (!session_keys_.count(tmsi)) {
+            session_keys_[tmsi] = {}; // key lives in the DlFlow after HO
+        }
+        (void)session_k;
+    }
+    void release_ue(uint32_t tmsi) {
+        ue_contexts_.erase(tmsi);
+        session_keys_.erase(tmsi);
+    }
+
     const UeContext* find_ue(uint32_t tmsi) const;
 
     // M12: session key per authenticated TMSI (nullptr if unknown).

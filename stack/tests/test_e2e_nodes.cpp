@@ -433,3 +433,228 @@ TEST(E2eNodes, WrongUsimKeyIsRejected) {
     }
     EXPECT_EQ(ue.rrc_state(), rrc::UeState::IDLE);
 }
+
+// ---- M14: mobility ----------------------------------------------------------
+
+namespace {
+
+core::BsNode make_cell(uint16_t cell_id, uint16_t pci) {
+    core::BsNodeConfig c;
+    c.cell_id = cell_id;
+    c.pci = pci;
+    return core::BsNode(c);
+}
+
+struct TwoCellLink {
+    core::BsNode bs_a; // cell 1
+    core::BsNode bs_b; // cell 2
+    core::UeNode ue;
+    uint32_t clock = 1000;
+
+    TwoCellLink()
+        : bs_a(make_cell(1, 0)),
+          bs_b(make_cell(2, 1)),
+          ue([] {
+              core::UeNodeConfig c;
+              c.meas_period_ms = 100;
+              return c;
+          }()) {
+        // Shared radio: UL fan-out to both cells, DL from both cells.
+        ue.set_air_send([this](const std::vector<uint8_t>& bits) {
+            bs_a.on_air_bits(bits);
+            bs_b.on_air_bits(bits);
+        });
+        bs_a.set_air_send([this](const std::vector<uint8_t>& bits) {
+            ue.on_air_bits(bits);
+        });
+        bs_b.set_air_send([this](const std::vector<uint8_t>& bits) {
+            ue.on_air_bits(bits);
+        });
+
+        // X2-like preparation: cell 2 accepts contexts from anywhere.
+        bs_a.set_ho_coordinator(
+            [this](uint16_t target, const core::BsNode::HoContext& ctx)
+                -> std::optional<uint16_t> {
+                return target == 2 ? std::optional<uint16_t>(
+                                         bs_b.prepare_handover(ctx))
+                                   : std::nullopt;
+            });
+    }
+
+    template <typename Pred>
+    bool pump_until(Pred pred, uint32_t max_ms = 400) {
+        for (uint32_t e = 0; e < max_ms; e += 10) {
+            if (pred()) return true;
+            pump(10);
+        }
+        return pred();
+    }
+
+    void pump(uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            bs_a.tick(clock);
+            bs_b.tick(clock);
+        }
+    }
+};
+
+} // namespace
+
+TEST(E2eNodes, HandoverBetweenCellsKeepsRegistrationAndSecurity) {
+    TwoCellLink l;
+
+    // Boot cell 1 alone so the UE camps on it, then light up cell 2.
+    l.pump(10);
+    l.bs_a.start_broadcast();
+    l.ue.attach();
+    ASSERT_TRUE(l.pump_until([&] { return l.ue.registered(); }));
+    ASSERT_EQ(l.ue.serving_cell(), 1u);
+    const uint32_t tmsi_before = l.ue.nas().assigned_tmsi();
+    ASSERT_NE(tmsi_before, 0u);
+
+    l.bs_b.start_broadcast();
+    l.pump(300); // both cells audible now
+    ASSERT_EQ(l.ue.serving_cell(), 1u);
+
+    // Cell 1 beacon goes dark -> the next report lacks it -> handover.
+    uint16_t old_crnti = l.ue.crnti();
+    l.bs_a.set_sib_enabled(false);
+    ASSERT_TRUE(l.pump_until([&] { return l.ue.serving_cell() == 2u; }, 1500));
+
+    EXPECT_NE(l.ue.crnti(), old_crnti);
+    EXPECT_TRUE(l.bs_b.ue_connected(l.ue.crnti()));
+    EXPECT_FALSE(l.bs_a.ue_connected(l.ue.crnti()));
+    // Registration and security context survived the migration.
+    EXPECT_TRUE(l.ue.registered());
+    EXPECT_EQ(l.ue.nas().assigned_tmsi(), tmsi_before);
+
+    // The user plane now flows through cell 2 only (cell 1 lost the UE).
+    for (int i = 0; i < 3; ++i) {
+        l.ue.send_app_data({'H', 'O', static_cast<uint8_t>('0' + i)});
+        l.pump(40);
+    }
+    EXPECT_GE(l.ue.app_rx_count(), 2u);
+}
+
+TEST(E2eNodes, PagingTriggersIdleUeServiceRequest) {
+    Link link;
+    link.boot();
+    link.ue.attach();
+    ASSERT_TRUE(link.pump_until([&] { return link.ue.registered(); }));
+
+    link.ue.detach();
+    link.pump(40);
+    ASSERT_FALSE(link.ue.registered());
+
+    // Network-originated reachability: page the IMSI in the next SIB.
+    link.bs.page("460011234567890");
+    ASSERT_TRUE(link.pump_until([&] { return link.ue.registered(); }, 2000));
+    EXPECT_NE(link.ue.nas().assigned_tmsi(), 0u);
+}
+
+TEST(E2eNodes, RadioLinkFailureReestablishmentKeepsNasContext) {
+    core::BsNode bs;
+    core::UeNodeConfig cfg;
+    cfg.radio_link_failure_ms = 300;
+    cfg.meas_period_ms = 0; // keep the scenario minimal
+    core::UeNode ue(cfg);
+
+    bool mute = false;
+    ue.set_air_send([&](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+    bs.set_air_send([&](const std::vector<uint8_t>& b) {
+        if (!mute) ue.on_air_bits(b);
+    });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            bs.tick(clock);
+        }
+    };
+    pump(10);
+    bs.start_broadcast();
+    ue.attach();
+    for (int i = 0; i < 60 && !ue.registered(); ++i) pump(10);
+    ASSERT_TRUE(ue.registered());
+    const uint32_t tmsi = ue.nas().assigned_tmsi();
+    ue.start_traffic(50);
+    pump(200);
+    ASSERT_GT(ue.app_rx_count(), 0u);
+
+    // Air goes dead: RLF fires, the UE re-establishes instead of re-attaching.
+    mute = true;
+    pump(700);
+    mute = false;
+
+    for (int i = 0; i < 80 && ue.rrc_state() != rrc::UeState::CONNECTED; ++i) {
+        pump(10);
+    }
+    EXPECT_EQ(ue.rrc_state(), rrc::UeState::CONNECTED);
+    EXPECT_TRUE(ue.registered());
+    EXPECT_EQ(ue.nas().assigned_tmsi(), tmsi); // NAS context preserved
+    pump(300);                                 // buffered traffic drains
+    EXPECT_GT(ue.app_rx_count(), 1u);
+}
+
+TEST(E2eNodes, ReestablishmentFallsBackToFullAttachAfterBlsRestart) {
+    core::BsNode bs_a; // dies mid-scenario (context lost)
+    core::BsNode bs_b; // fresh node takes over the air
+    core::UeNodeConfig cfg;
+    cfg.radio_link_failure_ms = 300;
+    cfg.meas_period_ms = 0;
+    core::UeNode ue(cfg);
+
+    core::BsNode* rx_side = &bs_a;
+    ue.set_air_send([&](const std::vector<uint8_t>& b) { rx_side->on_air_bits(b); });
+    bs_a.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            bs_a.tick(clock);
+            bs_b.tick(clock);
+        }
+    };
+    pump(10);
+    bs_a.start_broadcast();
+    ue.attach();
+    for (int i = 0; i < 60 && !ue.registered(); ++i) pump(10);
+    ASSERT_TRUE(ue.registered());
+    const uint32_t old_tmsi = ue.nas().assigned_tmsi();
+
+    // gNB restart: the old instance goes silent AND stops receiving.
+    rx_side = &bs_b;
+    bs_a.set_air_send([](const std::vector<uint8_t>&) {});
+    bs_b.set_air_send([](const std::vector<uint8_t>&) {}); // dead air first
+
+    pump(700); // RLF window: UE declares failure and starts re-establishing
+
+    // The fresh node takes over transmission; it has no context for the
+    // re-establishment request -> FAILURE -> full attach against bs_b.
+    // NOTE: the UE stays "registered" throughout (RLF keeps the NAS), so
+    // the completion signal is bs_b gaining the registration.
+    bs_b.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+    bs_b.start_broadcast();
+
+    // bs_b's counter flips as soon as the accept is *enqueued*; keep pumping
+    // afterwards so the UE actually receives it and lands REGISTERED.
+    // (The UE's own NAS may stay "registered" across RLF, so it is not a
+    // usable completion signal here.)
+    for (int i = 0; i < 250 && bs_b.registered_ue_count() == 0u; ++i) {
+        pump(10);
+    }
+    ASSERT_GE(bs_b.registered_ue_count(), 1u);
+    pump(300);
+    ASSERT_TRUE(ue.registered());
+    // TMSI pools are per-node, so equality proves nothing; prove the fresh
+    // core owns the session by round-tripping user-plane data through it.
+    ue.send_app_data({'F', 'B', '1'});
+    pump(80);
+    EXPECT_GE(ue.app_rx_count(), 1u);
+}

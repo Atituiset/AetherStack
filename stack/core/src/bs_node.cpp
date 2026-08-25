@@ -10,6 +10,22 @@
 namespace core {
 
 BsNode::BsNode(const BsNodeConfig& config) : config_(config) {
+    rrc_bs_.set_cell_identity(config_.cell_id, config_.plmn_id, config_.tac);
+
+    // M14: a successful re-establishment migrated the RRC context to a new
+    // C-RNTI — move the data-path state (flow, security, AM entities) with it.
+    rrc_bs_.set_reest_callback([this](uint16_t old_rnti, uint16_t new_rnti) {
+        auto it = flows_.find(old_rnti);
+        if (it != flows_.end()) {
+            auto f = std::move(it->second);
+            flows_.erase(it);
+            flows_[new_rnti] = std::move(f);
+        }
+        for (auto& [tmsi, crnti] : tmsi_to_crnti_) {
+            if (crnti == old_rnti) { crnti = new_rnti; break; }
+        }
+    });
+
     rach_bs_.set_send_callback([this](mac::RachMsgType type, const std::vector<uint8_t>& pdu) {
         AirFrameType frame_type = AirFrameType::DATA;
         switch (type) {
@@ -122,15 +138,26 @@ void BsNode::send_ack(uint16_t to, const HarqRx::Result& res) {
 }
 
 void BsNode::start_broadcast() {
+    broadcasting_ = true;
     broadcast_sib();
     timers_.schedule(config_.sib_period_ms, true, [this] { broadcast_sib(); });
 }
 
 void BsNode::broadcast_sib() {
+    if (!broadcasting_ || !sib_enabled_) return;
     auto mib_pdu = rrc_bs_.broadcast_mib().encode();
     auto sib1_pdu = rrc_bs_.broadcast_sib1().encode();
-    std::vector<uint8_t> pdu =
-        mac::build_pdu({{mac::LCID_MIB, mib_pdu}, {mac::LCID_SIB1, sib1_pdu}});
+    std::vector<std::pair<uint8_t, std::vector<uint8_t>>> entries = {
+        {mac::LCID_MIB, mib_pdu}, {mac::LCID_SIB1, sib1_pdu}};
+    // M14: one-shot paging record rides along with the system information.
+    if (!paging_target_.empty()) {
+        entries.emplace_back(
+            mac::LCID_PAGING,
+            std::vector<uint8_t>(paging_target_.begin(), paging_target_.end()));
+        LOG_INFO(ev::PAGE_TX, {{"imsi", paging_target_}});
+        paging_target_.clear();
+    }
+    std::vector<uint8_t> pdu = mac::build_pdu(entries);
     // Broadcasts use the same FEC framing but a dedicated process id and no
     // feedback (nothing to combine against across multiple receivers).
     auto payload = link_encode(pdu, 0x7F, 1);
@@ -175,6 +202,7 @@ void BsNode::handle_air_frame(const AirFrame& frame) {
 void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> pdu;
     if (is_harq_framed(payload)) {
+        if (!rrc_bs_.find_ue(rnti)) return;
         // UE uplink transport block: decode on this flow's RX entity.
         auto& rx_flow = flow(rnti);
         auto res = rx_flow.harq_rx.receive(payload);
@@ -191,7 +219,7 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
         switch (lcid) {
             case mac::LCID_CCCH: {
                 trace_pdu("RRC", "RX", "ccch", sdu);
-                rrc_bs_.handle_message(rnti, sdu);
+                handle_ccch_sdu(rnti, sdu);
                 break;
             }
             case mac::LCID_NAS_DCCH: {
@@ -284,6 +312,131 @@ void BsNode::handle_dl_data(uint16_t rnti, const std::vector<uint8_t>& payload) 
                 break;
         }
     }
+}
+
+// ---- M14: mobility ----------------------------------------------------------
+
+void BsNode::handle_ccch_sdu(uint16_t rnti, const std::vector<uint8_t>& sdu) {
+    auto msg = rrc::RrcMessage::decode(sdu);
+    switch (msg.msg_type) {
+        case rrc::RrcMessageType::MEAS_REPORT: {
+            // [n:1]{[cell_id:2][strength:1]}; strength = SIB RX count.
+            // Policy: hand over only when the SERVING cell went missing from
+            // the report (radio condition degraded) while another cell is
+            // audible — co-visible neighbours alone do not trigger churn.
+            if (msg.value.empty()) break;
+            const size_t n = msg.value[0];
+            bool serving_audible = false;
+            uint16_t best_cell = 0;
+            uint8_t best_strength = 0;
+            for (size_t i = 0; i < n && 1 + 3 * i + 2 < msg.value.size(); ++i) {
+                uint16_t cell = static_cast<uint16_t>(
+                    msg.value[1 + 3 * i] | (msg.value[2 + 3 * i] << 8));
+                uint8_t strength = msg.value[3 + 3 * i];
+                if (cell == config_.cell_id) {
+                    serving_audible = true;
+                } else if (strength > best_strength) {
+                    best_strength = strength;
+                    best_cell = cell;
+                }
+            }
+            if (!serving_audible && best_cell != 0 &&
+                config_.auto_handover && ho_coordinator_) {
+                request_handover(rnti, best_cell);
+            }
+            break;
+        }
+        case rrc::RrcMessageType::HO_COMPLETE: {
+            if (msg.value.size() < 2) break;
+            uint16_t new_crnti = static_cast<uint16_t>(msg.value[0] |
+                                                       (msg.value[1] << 8));
+            if (ho_prepared_.count(new_crnti)) {
+                LOG_INFO(ev::HO_COMPLETE_RX,
+                         {{"cell", std::to_string(config_.cell_id)},
+                          {"rnti", std::to_string(new_crnti)}});
+            }
+            // As the source: release the old context once the UE confirms it
+            // landed on the target cell.
+            for (auto it = initiated_ho_.begin(); it != initiated_ho_.end();
+                 ++it) {
+                if (it->second.new_crnti == new_crnti) {
+                    uint16_t old_rnti = it->first;
+                    uint32_t tmsi = tmsi_for_crnti(old_rnti);
+                    if (tmsi != 0) {
+                        nas_bs_.release_ue(tmsi);
+                        tmsi_to_crnti_.erase(tmsi);
+                    }
+                    rrc_bs_.release_context(old_rnti);
+                    flows_.erase(old_rnti);
+                    initiated_ho_.erase(it);
+                    break;
+                }
+            }
+            (void)rnti;
+            break;
+        }
+        default:
+            // SETUP_*, RELEASE and REESTABLISHMENT_* stay in the RRC layer;
+            // the reest callback (wired in the ctor) migrates our flows.
+            rrc_bs_.handle_message(rnti, sdu);
+            break;
+    }
+}
+
+uint32_t BsNode::tmsi_for_crnti(uint16_t crnti) const {
+    for (const auto& [tmsi, c] : tmsi_to_crnti_) {
+        if (c == crnti) return tmsi;
+    }
+    return 0;
+}
+
+void BsNode::request_handover(uint16_t crnti, uint16_t target_cell_id) {
+    auto fit = flows_.find(crnti);
+    if (fit == flows_.end() || !ho_coordinator_) return;
+
+    HoContext ctx;
+    ctx.tmsi = tmsi_for_crnti(crnti);
+    ctx.sec_on = fit->second.sec_on;
+    ctx.up_key = fit->second.up_key;
+    const auto* ue = nas_bs_.find_ue(ctx.tmsi); // IMSI lookup, best effort
+    if (ue) ctx.imsi = ue->imsi;
+
+    auto new_crnti = ho_coordinator_(target_cell_id, ctx);
+    if (!new_crnti.has_value()) {
+        LOG_WARN(ev::HO_TRIGGERED,
+                 {{"from_cell", std::to_string(config_.cell_id)},
+                  {"to_cell", std::to_string(target_cell_id)},
+                  {"result", "refused"}});
+        return;
+    }
+
+    LOG_INFO(ev::HO_TRIGGERED,
+             {{"from_cell", std::to_string(config_.cell_id)},
+              {"to_cell", std::to_string(target_cell_id)}});
+    LOG_INFO(ev::HO_COMMAND_TX,
+             {{"cell", std::to_string(target_cell_id)},
+              {"rnti", std::to_string(*new_crnti)}});
+
+    rrc::RrcMessage cmd;
+    cmd.msg_type = rrc::RrcMessageType::HO_COMMAND;
+    cmd.value = {static_cast<uint8_t>(target_cell_id & 0xFF),
+                 static_cast<uint8_t>((target_cell_id >> 8) & 0xFF),
+                 static_cast<uint8_t>(*new_crnti & 0xFF),
+                 static_cast<uint8_t>((*new_crnti >> 8) & 0xFF)};
+    downlink_send(crnti, mac::LCID_CCCH, cmd.encode());
+    initiated_ho_[crnti] = {target_cell_id, *new_crnti};
+}
+
+std::optional<uint16_t> BsNode::prepare_handover(const HoContext& ctx) {
+    uint16_t new_crnti = next_ho_crnti_++;
+    rrc_bs_.admit_connected(new_crnti);
+    auto& f = flow(new_crnti);
+    f.up_key = ctx.up_key;
+    f.sec_on = ctx.sec_on;
+    if (ctx.tmsi != 0) tmsi_to_crnti_[ctx.tmsi] = new_crnti;
+    if (!ctx.imsi.empty()) nas_bs_.adopt_ue(ctx.tmsi, ctx.imsi, ctx.up_key);
+    ho_prepared_[new_crnti] = ctx;
+    return new_crnti;
 }
 
 void BsNode::downlink_send(uint16_t rnti, uint8_t lcid,

@@ -24,8 +24,12 @@ void RrcUe::on_sib1_received(const Sib1& sib1) {
                               {"cell_id", std::to_string(sib1.cell_id)}});
 }
 
-void RrcUe::start_connection() {
-    if (state_ != UeState::IDLE) {
+void RrcUe::restore_connected(uint16_t crnti) {
+    assigned_crnti_ = crnti;
+    if (state_ != UeState::CONNECTED) transition(UeState::CONNECTED);
+}
+
+void RrcUe::start_connection() {    if (state_ != UeState::IDLE) {
         LOG_WARN(ev::RRC_SETUP_IGNORED, {{"state", ue_state_str(state_)}});
         return;
     }

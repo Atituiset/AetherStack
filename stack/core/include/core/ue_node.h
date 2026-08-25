@@ -28,6 +28,9 @@ struct UeNodeConfig {
     uint32_t backoff_min_ms = 100;
     uint32_t backoff_max_ms = 300;
     uint32_t rng_seed = 42;
+    // M14: mobility knobs.
+    uint32_t meas_period_ms = 500;      // measurement report interval
+    uint32_t radio_link_failure_ms = 0; // 0 disables RLF detection
 };
 
 // UE-side protocol stack orchestration. Owns every layer entity, encodes and
@@ -66,6 +69,7 @@ public:
     nas::UeState nas_state() const { return nas_ue_.state(); }
     nas::NasUe& nas() { return nas_ue_; }   // test/USIM provisioning access
     uint16_t crnti() const { return crnti_cache_; }
+    uint16_t serving_cell() const { return serving_cell_; }  // M14
     bool registered() const { return nas_ue_.state() == nas::UeState::REGISTERED; }
     bool has_system_info() const { return mib_ok_ && sib1_ok_; }
     uint32_t app_tx_count() const { return app_tx_seq_; }
@@ -88,7 +92,8 @@ private:
     void handle_rach_payload(AirFrameType type, uint16_t rnti,
                              const std::vector<uint8_t>& payload);
     void handle_data_pdu(uint16_t rnti, const std::vector<uint8_t>& pdu);
-    void handle_sysinfo_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu);
+    void handle_sysinfo_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu,
+                            bool broadcast);
     void handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu);
     void handle_pong(const std::vector<uint8_t>& data); // RTT accounting
 
@@ -101,6 +106,15 @@ private:
     // prerequisites (system info, idle state) are met.
     void maybe_start_attach();
     void abort_attach(const char* reason);
+
+    // ---- M14: mobility -------------------------------------------------------
+    void handle_ccch_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu);
+    void start_measurements();
+    void stop_measurements();
+    void send_measurement_report();
+    void apply_handover(uint16_t target_cell, uint16_t new_crnti);
+    void declare_rlf();               // radio link failure -> re-establishment
+    void reestablish_failed(const char* reason); // full fallback to attach
 
     void schedule_rach_window_timer();
     void schedule_backoff_then_retry();
@@ -133,6 +147,20 @@ private:
     TimerId rach_window_timer_ = 0;
 
     std::vector<uint8_t> pending_ccch_; // encoded RRC SetupRequest for MSG3
+
+    // ---- M14: mobility state -------------------------------------------------
+    struct NeighborCell {
+        uint32_t rx_count = 0;      // SIB receptions (strength proxy)
+        uint32_t last_seen_ms = 0;
+    };
+    std::unordered_map<uint16_t, NeighborCell> cells_; // by cell id
+    uint16_t serving_cell_ = 0;       // cell we attached through
+    uint32_t last_dl_ms_ = 0;         // RLF watchdog input
+    bool reestablish_pending_ = false;
+    uint16_t pre_rlf_crnti_ = 0;
+    std::vector<uint8_t> reest_req_pdu_;
+    TimerId meas_timer_ = 0;
+    TimerId reest_guard_ = 0;
 
     uint32_t app_tx_seq_ = 0;
     uint32_t app_rx_count_ = 0;

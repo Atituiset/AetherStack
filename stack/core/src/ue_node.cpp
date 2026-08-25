@@ -72,6 +72,12 @@ void UeNode::tick(uint32_t now_ms) {
     for (const auto& pdu : app_am_tx_.tick(now_ms_)) {
         uplink_send(mac::LCID_APP_DTCH, pdcp::tx(rlc::tm_tx(pdu)));
     }
+    // M14: radio link failure watchdog while connected.
+    if (config_.radio_link_failure_ms != 0 && !reestablish_pending_ &&
+        rrc_ue_.state() == rrc::UeState::CONNECTED && last_dl_ms_ != 0 &&
+        now_ms_ - last_dl_ms_ > config_.radio_link_failure_ms) {
+        declare_rlf();
+    }
 }
 
 void UeNode::pump_harq() {
@@ -109,6 +115,16 @@ void UeNode::maybe_start_attach() {
         return; // procedure already in flight or connected
     }
 
+    if (reestablish_pending_) {
+        // M14: a re-establishment is in progress (its guard timer runs);
+        // retries must keep carrying the re-establishment request, not a
+        // fresh SetupRequest.
+        pending_ccch_ = reest_req_pdu_;
+        LOG_INFO(ev::ATTACH_RETRY, {{"delay_ms", "0"}});
+        rach_ue_.start_rach();
+        return;
+    }
+
     LOG_INFO(ev::UE_ATTACH_START, {{"imsi", config_.imsi}});
     pending_ccch_.clear();
     rrc_ue_.start_connection(); // fills pending_ccch_ via send callback
@@ -136,6 +152,7 @@ void UeNode::abort_attach(const char* reason) {
     crnti_cache_ = 0;
     nas_ue_.force_deregistered();
     stop_traffic();
+    stop_measurements();
     harq_tx_.reset();
     harq_rx_.reset();
     app_am_tx_.reset();
@@ -156,6 +173,7 @@ void UeNode::detach() {
     pending_ccch_.clear();
     attach_requested_ = false;
     stop_traffic();
+    stop_measurements();
     harq_tx_.reset();
     harq_rx_.reset();
     app_am_tx_.reset();
@@ -306,6 +324,7 @@ void UeNode::handle_rach_payload(AirFrameType type, uint16_t /*rnti*/,
 }
 
 void UeNode::handle_data_pdu(uint16_t rnti, const std::vector<uint8_t>& payload) {
+    last_dl_ms_ = now_ms_; // any decoded frame is evidence of a live link (M14)
     // DATA frames come in two flavours (M9): HARQ transport blocks (user
     // traffic) and legacy raw MAC PDUs (HARQ-ACK control). The magic byte
     // in the HARQ header tells them apart.
@@ -320,15 +339,17 @@ void UeNode::handle_data_pdu(uint16_t rnti, const std::vector<uint8_t>& payload)
     }
     trace_pdu("MAC", "RX", rnti == mac::RNTI_BROADCAST ? "broadcast" : "dl data", pdu);
     for (auto& [lcid, sdu] : mac::parse_pdu(pdu)) {
-        if (lcid == mac::LCID_MIB || lcid == mac::LCID_SIB1) {
-            handle_sysinfo_sdu(lcid, sdu);
+        if (lcid == mac::LCID_MIB || lcid == mac::LCID_SIB1 ||
+            lcid == mac::LCID_PAGING) {
+            handle_sysinfo_sdu(lcid, sdu, rnti == mac::RNTI_BROADCAST);
         } else if (rnti != mac::RNTI_BROADCAST && !sdu.empty()) {
             handle_dedicated_sdu(lcid, sdu);
         }
     }
 }
 
-void UeNode::handle_sysinfo_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu) {
+void UeNode::handle_sysinfo_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu,
+                                bool broadcast) {
     if (lcid == mac::LCID_MIB && sdu.size() >= 5) {
         auto mib = rrc::Mib::decode(sdu);
         mib_ok_ = true;
@@ -337,6 +358,19 @@ void UeNode::handle_sysinfo_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu) {
         auto sib1 = rrc::Sib1::decode(sdu);
         sib1_ok_ = true;
         rrc_ue_.on_sib1_received(sib1);
+        // M14: neighbour-cell tracking. The first cell heard becomes the
+        // serving cell; later cells accumulate as handover candidates.
+        auto& c = cells_[sib1.cell_id];
+        ++c.rx_count;
+        c.last_seen_ms = now_ms_;
+        if (serving_cell_ == 0) serving_cell_ = sib1.cell_id;
+    } else if (lcid == mac::LCID_PAGING && broadcast) {
+        // M14: paging record carries the IMSI in the clear (pre-M15 design).
+        std::string paged_imsi(sdu.begin(), sdu.end());
+        if (paged_imsi != config_.imsi) return;
+        LOG_INFO(ev::PAGE_RX, {{"imsi", paged_imsi}});
+        if (!registered()) attach(); // service request: re-attach
+        return;
     } else {
         LOG_WARN(ev::SYSINFO_DECODE_FAIL, {{"lcid", std::to_string(lcid)}});
         return;
@@ -348,13 +382,7 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
     switch (lcid) {
         case mac::LCID_CCCH: {
             trace_pdu("RRC", "RX", "dcch", sdu);
-            rrc_ue_.on_message(sdu);
-            harq_rx_.reset(); // fresh connection: no cross-attach soft memory
-            // Connection is up: proceed with the NAS attach if one is pending.
-            if (attach_requested_ && nas_ue_.state() == nas::UeState::DEREGISTERED &&
-                rrc_ue_.state() == rrc::UeState::CONNECTED) {
-                nas_ue_.send_attach_request(config_.imsi);
-            }
+            handle_ccch_sdu(lcid, sdu);
             break;
         }
         case mac::LCID_NAS_DCCH: {
@@ -378,6 +406,9 @@ void UeNode::handle_dedicated_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu)
                 up_key_ = nas_ue_.session_key();
                 up_sec_on_ = true;
                 LOG_INFO(ev::SEC_ENABLED, {{"dir", "ul"}});
+            }
+            if (nas_ue_.state() == nas::UeState::REGISTERED) {
+                start_measurements(); // M14: connected-mode measurements
             }
             break;
         }
@@ -528,6 +559,178 @@ void UeNode::schedule_backoff_then_retry() {
             rach_ue_.on_rar_timeout(); // resends MSG1 or gives up -> IDLE
         }
     });
+}
+
+// ---- M14: mobility ----------------------------------------------------------
+
+void UeNode::handle_ccch_sdu(uint8_t lcid, const std::vector<uint8_t>& sdu) {
+    auto msg = rrc::RrcMessage::decode(sdu);
+    switch (msg.msg_type) {
+        case rrc::RrcMessageType::HO_COMMAND: {
+            // [target_cell:2][new_crnti:2]
+            if (msg.value.size() < 4) break;
+            uint16_t target = static_cast<uint16_t>(msg.value[0] |
+                                                    (msg.value[1] << 8));
+            uint16_t new_crnti = static_cast<uint16_t>(msg.value[2] |
+                                                       (msg.value[3] << 8));
+            if (cells_.count(target) == 0) {
+                LOG_WARN(ev::HO_TRIGGERED,
+                         {{"to_cell", std::to_string(target)},
+                          {"result", "unknown_cell"}});
+                break;
+            }
+            apply_handover(target, new_crnti);
+            break;
+        }
+        case rrc::RrcMessageType::REESTABLISHMENT_OK: {
+            if (!reestablish_pending_ || msg.value.size() < 2) break;
+            uint16_t new_crnti = static_cast<uint16_t>(msg.value[0] |
+                                                       (msg.value[1] << 8));
+            reestablish_pending_ = false;
+            crnti_cache_ = new_crnti;
+            rrc_ue_.restore_connected(new_crnti);
+            harq_rx_.reset(); // fresh connection: no cross-attach soft memory
+            LOG_INFO(ev::RRC_REEST_OK, {{"old", std::to_string(pre_rlf_crnti_)},
+                                        {"new", std::to_string(new_crnti)}});
+            break;
+        }
+        case rrc::RrcMessageType::REESTABLISHMENT_FAILURE:
+            if (reestablish_pending_) reestablish_failed("context_gone");
+            break;
+        default:
+            // Legacy signalling: SETUP / RELEASE / etc.
+            rrc_ue_.on_message(sdu);
+            harq_rx_.reset(); // fresh connection: no cross-attach soft memory
+            // Connection is up: proceed with the NAS attach if one is pending.
+            if (attach_requested_ &&
+                nas_ue_.state() == nas::UeState::DEREGISTERED &&
+                rrc_ue_.state() == rrc::UeState::CONNECTED) {
+                nas_ue_.send_attach_request(config_.imsi);
+                start_measurements();
+            }
+            break;
+    }
+    (void)lcid;
+}
+
+void UeNode::start_measurements() {
+    if (meas_timer_ != 0 || config_.meas_period_ms == 0) return;
+    meas_timer_ = timers_.schedule(config_.meas_period_ms, true, [this] {
+        if (rrc_ue_.state() == rrc::UeState::CONNECTED && !cells_.empty()) {
+            send_measurement_report();
+        }
+    });
+}
+
+void UeNode::stop_measurements() {
+    if (meas_timer_ != 0) {
+        timers_.cancel(meas_timer_);
+        meas_timer_ = 0;
+    }
+}
+
+void UeNode::send_measurement_report() {
+    // [n:1]{[cell_id:2][strength:1]} — strength = SIB RX count so far.
+    // Only currently-audible cells are reported; a cell whose broadcasts
+    // went silent drops out of the report after kCellStaleMs.
+    constexpr uint32_t kCellStaleMs = 800;
+    std::vector<std::pair<uint16_t, uint32_t>> audible;
+    for (const auto& [cell_id, c] : cells_) {
+        if (now_ms_ - c.last_seen_ms <= kCellStaleMs) {
+            audible.emplace_back(cell_id, c.rx_count);
+        }
+    }
+    std::vector<uint8_t> value;
+    value.push_back(static_cast<uint8_t>(audible.size()));
+    for (const auto& [cell_id, rx] : audible) {
+        value.push_back(static_cast<uint8_t>(cell_id & 0xFF));
+        value.push_back(static_cast<uint8_t>((cell_id >> 8) & 0xFF));
+        value.push_back(static_cast<uint8_t>(std::min<uint32_t>(rx, 255)));
+    }
+    rrc::RrcMessage report;
+    report.msg_type = rrc::RrcMessageType::MEAS_REPORT;
+    report.value = value;
+    uplink_send(mac::LCID_CCCH, report.encode());
+    LOG_INFO(ev::MEAS_REPORT_TX,
+             {{"serving", std::to_string(serving_cell_)},
+              {"n", std::to_string(audible.size())}});
+}
+
+void UeNode::apply_handover(uint16_t target_cell, uint16_t new_crnti) {
+    LOG_INFO(ev::HO_COMMAND_TX,
+             {{"cell", std::to_string(target_cell)},
+              {"rnti", std::to_string(new_crnti)}});
+    serving_cell_ = target_cell;
+    crnti_cache_ = new_crnti;
+    rrc_ue_.restore_connected(new_crnti);
+    // Air-side state restarts on the new cell; NAS registration and the
+    // security context survive (the target received them at preparation).
+    harq_tx_.reset();
+    harq_rx_.reset();
+    app_am_tx_.reset();
+    app_am_rx_dl_.reset();
+    pdcp_seq_ = 0;
+
+    // Confirm to the network. Both cells hear this; only the target has a
+    // matching prepared context.
+    rrc::RrcMessage done;
+    done.msg_type = rrc::RrcMessageType::HO_COMPLETE;
+    done.value = {static_cast<uint8_t>(new_crnti & 0xFF),
+                  static_cast<uint8_t>((new_crnti >> 8) & 0xFF)};
+    uplink_send(mac::LCID_CCCH, done.encode());
+}
+
+void UeNode::declare_rlf() {
+    LOG_ERROR(ev::RLF_DETECTED,
+              {{"crnti", std::to_string(crnti_cache_)}});
+    pre_rlf_crnti_ = crnti_cache_;
+    reestablish_pending_ = true;
+    // Air side dies with the link; NAS registration and security survive.
+    // Traffic keeps running: pings buffer in the AM/HARQ machinery and
+    // drain once the link is re-established (session continuity).
+    harq_tx_.reset();
+    harq_rx_.reset();
+    app_am_tx_.reset();
+    app_am_rx_dl_.reset();
+    rach_ue_.force_idle();
+    rrc_ue_.force_idle();
+    crnti_cache_ = 0;
+
+    // Re-synchronise through RACH; MSG3 carries the re-establishment request
+    // instead of an RRC SetupRequest.
+    rrc::RrcMessage req;
+    req.msg_type = rrc::RrcMessageType::REESTABLISHMENT_REQUEST;
+    req.value = {static_cast<uint8_t>(pre_rlf_crnti_ & 0xFF),
+                 static_cast<uint8_t>((pre_rlf_crnti_ >> 8) & 0xFF),
+                 static_cast<uint8_t>(serving_cell_ & 0xFF),
+                 static_cast<uint8_t>((serving_cell_ >> 8) & 0xFF)};
+    reest_req_pdu_ = req.encode();
+    LOG_INFO(ev::RRC_REEST_REQ_TX,
+             {{"old_crnti", std::to_string(pre_rlf_crnti_)}});
+    pending_ccch_ = reest_req_pdu_;
+
+    if (reest_guard_ != 0) timers_.cancel(reest_guard_);
+    reest_guard_ = timers_.schedule(config_.attach_guard_ms, false, [this] {
+        reest_guard_ = 0;
+        if (reestablish_pending_) reestablish_failed("guard_timeout");
+    });
+
+    attach_requested_ = true; // fallback path if re-establishment fails
+    rach_ue_.start_rach();
+}
+
+void UeNode::reestablish_failed(const char* reason) {
+    LOG_WARN(ev::RRC_REEST_FAIL,
+             {{"reason", reason},
+              {"c_rnti", std::to_string(pre_rlf_crnti_)}});
+    reestablish_pending_ = false;
+    nas_ue_.force_deregistered();
+    up_sec_on_ = false;
+    pdcp_seq_ = 0;
+    crnti_cache_ = 0;
+    rach_ue_.force_idle();
+    rrc_ue_.force_idle();
+    maybe_start_attach(); // full re-attach with a fresh registration
 }
 
 }

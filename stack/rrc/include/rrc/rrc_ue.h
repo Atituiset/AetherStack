@@ -27,6 +27,9 @@ public:
     // Abort any in-flight procedure and drop to IDLE without transmitting
     // (fault recovery, e.g. attach guard timeout).
     void force_idle();
+    // M14: adopt an existing connection out of band (handover command or
+    // successful re-establishment) — no signalling on this entity.
+    void restore_connected(uint16_t crnti);
     void on_message(const std::vector<uint8_t>& pdu);
 
     uint16_t assigned_crnti() const { return assigned_crnti_; }
