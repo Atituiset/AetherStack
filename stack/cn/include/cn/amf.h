@@ -61,6 +61,7 @@ private:
     std::unordered_map<uint32_t, UeContext> ue_contexts_;
     std::unordered_map<uint32_t, UeContext> pending_auth_;
     std::unordered_map<uint32_t, std::vector<uint8_t>> pending_rnti_; // auth ctx
+    std::unordered_map<uint32_t, uint16_t> ho_target_; // tmsi -> tgt cell
     std::unordered_map<std::string, std::array<uint8_t, crypto::kKey256Size>> keys_;
     std::unordered_map<uint32_t, std::array<uint8_t, crypto::kKey256Size>> session_keys_;
     uint32_t next_tmsi_ = 0x00010001;

@@ -540,6 +540,77 @@ TEST(E2eNodes, HandoverBetweenCellsKeepsRegistrationAndSecurity) {
     EXPECT_GE(l.ue.app_rx_count(), 2u);
 }
 
+TEST(E2eNodes, AmfArbitratedHandoverBetweenCells) {
+    // M15: with a separated core the handover is arbitrated by the AMF —
+    // no X2-like coordinator is wired. HO_REQUIRED -> HO_COMMAND (target
+    // prepares) -> HO_NOTIFY/HO_PREPARED (source notifies the UE).
+    // One AMF whose link fans out to both gNBs (multi-peer InMemoryCnLink).
+    cn::InMemoryCnLink ng_amf_side, ng_gnb_a_side, ng_gnb_b_side;
+    cn::Amf amf{ng_amf_side};
+    ng_gnb_a_side.connect_to(&ng_amf_side);
+    ng_gnb_b_side.connect_to(&ng_amf_side);
+
+    core::BsNodeConfig cfg_a; cfg_a.cell_id = 1;
+    core::BsNodeConfig cfg_b; cfg_b.cell_id = 2;
+    core::BsNode bs_a(make_cell(1, 0));
+    core::BsNode bs_b(make_cell(2, 1));
+
+    core::BsNode::CnEndpoints ep_a;
+    ep_a.amf = &ng_gnb_a_side; ep_a.gnb_cell = 1;
+    core::BsNode::CnEndpoints ep_b;
+    ep_b.amf = &ng_gnb_b_side; ep_b.gnb_cell = 2;
+    bs_a.attach_core(ep_a);
+    bs_b.attach_core(ep_b);
+
+    core::UeNodeConfig uc;
+    uc.meas_period_ms = 100;
+    core::UeNode ue(uc);
+
+    ue.set_air_send([&](const std::vector<uint8_t>& b) {
+        bs_a.on_air_bits(b);
+        bs_b.on_air_bits(b);
+    });
+    bs_a.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+    bs_b.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            bs_a.tick(clock);
+            bs_b.tick(clock);
+        }
+    };
+
+    pump(10);
+    bs_a.start_broadcast();
+    ue.attach();
+    for (int i = 0; i < 60 && !ue.registered(); ++i) pump(10);
+    ASSERT_TRUE(ue.registered());
+    ASSERT_EQ(ue.serving_cell(), 1u);
+    const uint32_t tmsi_before = ue.nas().assigned_tmsi();
+
+    // Light up cell 2, then darken cell 1: measurement-report driven HO,
+    // arbitrated entirely through the AMF.
+    bs_b.start_broadcast();
+    pump(300);
+    bs_a.set_sib_enabled(false);
+    bool ho_done = false;
+    for (int i = 0; i < 200 && !ho_done; ++i) {
+        pump(10);
+        ho_done = ue.serving_cell() == 2u &&
+                  ue.rrc_state() == rrc::UeState::CONNECTED;
+    }
+    EXPECT_TRUE(ho_done);
+    EXPECT_NE(ue.crnti(), 0u);
+    EXPECT_TRUE(bs_b.ue_connected(ue.crnti()));
+    // Registration survived; user plane still flows (UPF not wired here, so
+    // just verify the RRC/registration state).
+    EXPECT_TRUE(ue.registered());
+    EXPECT_EQ(ue.nas().assigned_tmsi(), tmsi_before);
+}
+
 TEST(E2eNodes, PagingTriggersIdleUeServiceRequest) {
     Link link;
     link.boot();

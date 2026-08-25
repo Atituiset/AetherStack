@@ -42,6 +42,7 @@ enum class MsgType : uint8_t {
     HO_REQUIRED = 9,
     HO_COMMAND = 10,
     HO_NOTIFY = 11,
+    HO_PREPARED = 12,     // AMF -> all gNBs {tmsi:4}{tgt:2}{new_rnti:2}
     // user plane
     UL_DATA = 32,
     DL_DATA = 33,

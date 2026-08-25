@@ -137,6 +137,70 @@ void BsNode::handle_cn_message(const cn::CnMessage& msg) {
             break;
         }
 
+        case cn::MsgType::HO_COMMAND: {
+            // AMF-arbitrated handover: {tmsi:4}{tgt:2} ++ ctx blob
+            // (sec_on:1, key:32, imsi_len:1, imsi). Only the named target
+            // acts; other gNBs sharing the link ignore it.
+            if (msg.value.size() < 6) break;
+            const uint32_t ho_tmsi = cn::get32(msg.value, 0);
+            const uint16_t target_cell = cn::get16(msg.value, 4);
+            if (target_cell != config_.cell_id) break;
+            BsNode::HoContext ctx;
+            ctx.tmsi = ho_tmsi;
+            const std::vector<uint8_t>& v = msg.value;
+            size_t off = 6;
+            if (v.size() < off + 1 + crypto::kKey256Size + 1) break;
+            ctx.sec_on = v[off] != 0;
+            ++off;
+            std::copy(v.begin() + static_cast<long>(off),
+                      v.begin() + static_cast<long>(off + crypto::kKey256Size),
+                      ctx.up_key.begin());
+            off += crypto::kKey256Size;
+            const uint8_t imsi_len = v[off];
+            ++off;
+            if (v.size() < off + imsi_len) break;
+            ctx.imsi.assign(v.begin() + static_cast<long>(off),
+                            v.begin() + static_cast<long>(off + imsi_len));
+            auto new_crnti = prepare_handover(ctx);
+            if (new_crnti && cn_amf_) {
+                // Tell the AMF (and thus the source gNB) the allocation.
+                cn::CnMessage note;
+                note.msg_type = cn::MsgType::HO_NOTIFY;
+                cn::put32(note.value, ctx.tmsi);
+                cn::put16(note.value, *new_crnti);
+                cn_amf_->send(note);
+            }
+            break;
+        }
+
+        case cn::MsgType::HO_PREPARED: {
+            // {tmsi:4}{tgt:2}{new_rnti:2} — the source completes the UE
+            // notification once the target has allocated a C-RNTI.
+            if (msg.value.size() < 8) break;
+            const uint32_t tmsi = cn::get32(msg.value, 0);
+            const uint16_t tgt = cn::get16(msg.value, 4);
+            const uint16_t new_crnti = cn::get16(msg.value, 6);
+            for (auto& [src_rnti, ho] : initiated_ho_) {
+                if (ho.target_cell == tgt &&
+                    tmsi_for_crnti(src_rnti) == tmsi) {
+                    ho.new_crnti = new_crnti;
+                    LOG_INFO(ev::HO_COMMAND_TX,
+                             {{"cell", std::to_string(tgt)},
+                              {"rnti", std::to_string(new_crnti)}});
+                    rrc::RrcMessage cmd;
+                    cmd.msg_type = rrc::RrcMessageType::HO_COMMAND;
+                    cmd.value = {
+                        static_cast<uint8_t>(tgt & 0xFF),
+                        static_cast<uint8_t>((tgt >> 8) & 0xFF),
+                        static_cast<uint8_t>(new_crnti & 0xFF),
+                        static_cast<uint8_t>((new_crnti >> 8) & 0xFF)};
+                    downlink_send(src_rnti, mac::LCID_CCCH, cmd.encode());
+                    break;
+                }
+            }
+            break;
+        }
+
         case cn::MsgType::DL_DATA: {
             // UPF-routed downlink user-plane data for one of our UEs.
             if (msg.value.size() < 6) break;
@@ -475,8 +539,8 @@ void BsNode::handle_ccch_sdu(uint16_t rnti, const std::vector<uint8_t>& sdu) {
                     best_cell = cell;
                 }
             }
-            if (!serving_audible && best_cell != 0 &&
-                config_.auto_handover && ho_coordinator_) {
+            if (!serving_audible && best_cell != 0 && config_.auto_handover &&
+                (ho_coordinator_ || core_separated())) {
                 request_handover(rnti, best_cell);
             }
             break;
@@ -494,12 +558,18 @@ void BsNode::handle_ccch_sdu(uint16_t rnti, const std::vector<uint8_t>& sdu) {
             // landed on the target cell.
             for (auto it = initiated_ho_.begin(); it != initiated_ho_.end();
                  ++it) {
-                if (it->second.new_crnti == new_crnti) {
+                if (it->second.new_crnti == new_crnti && new_crnti != 0) {
                     uint16_t old_rnti = it->first;
                     uint32_t tmsi = tmsi_for_crnti(old_rnti);
                     if (tmsi != 0) {
                         nas_bs_.release_ue(tmsi);
                         tmsi_to_crnti_.erase(tmsi);
+                        if (cn_amf_) {
+                            cn::CnMessage rel;
+                            rel.msg_type = cn::MsgType::UE_CTX_RELEASE;
+                            cn::put32(rel.value, tmsi);
+                            cn_amf_->send(rel);
+                        }
                     }
                     rrc_bs_.release_context(old_rnti);
                     flows_.erase(old_rnti);
@@ -527,7 +597,8 @@ uint32_t BsNode::tmsi_for_crnti(uint16_t crnti) const {
 
 void BsNode::request_handover(uint16_t crnti, uint16_t target_cell_id) {
     auto fit = flows_.find(crnti);
-    if (fit == flows_.end() || !ho_coordinator_) return;
+    if (fit == flows_.end()) return;
+    if (!ho_coordinator_ && !core_separated()) return;
 
     HoContext ctx;
     ctx.tmsi = tmsi_for_crnti(crnti);
@@ -535,6 +606,26 @@ void BsNode::request_handover(uint16_t crnti, uint16_t target_cell_id) {
     ctx.up_key = fit->second.up_key;
     const auto* ue = nas_bs_.find_ue(ctx.tmsi); // IMSI lookup, best effort
     if (ue) ctx.imsi = ue->imsi;
+
+    // M15: with a separated core the AMF arbitrates the handover — send
+    // HO_REQUIRED and let it come back as HO_COMMAND on the target's link.
+    if (core_separated() && cn_amf_ && !ho_coordinator_) {
+        LOG_INFO(ev::HO_TRIGGERED,
+                 {{"from_cell", std::to_string(config_.cell_id)},
+                  {"to_cell", std::to_string(target_cell_id)},
+                  {"via", "amf"}});
+        cn::CnMessage m;
+        m.msg_type = cn::MsgType::HO_REQUIRED;
+        cn::put32(m.value, ctx.tmsi);
+        cn::put16(m.value, target_cell_id);
+        m.value.push_back(ctx.sec_on ? 1 : 0);
+        m.value.insert(m.value.end(), ctx.up_key.begin(), ctx.up_key.end());
+        m.value.push_back(static_cast<uint8_t>(ctx.imsi.size()));
+        m.value.insert(m.value.end(), ctx.imsi.begin(), ctx.imsi.end());
+        cn_amf_->send(m);
+        initiated_ho_[crnti] = {target_cell_id, 0}; // crnti unknown until HO_COMMAND
+        return;
+    }
 
     auto new_crnti = ho_coordinator_(target_cell_id, ctx);
     if (!new_crnti.has_value()) {

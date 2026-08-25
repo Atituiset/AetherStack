@@ -1,6 +1,7 @@
 // M6.5 T7/T9: thin process shell. All protocol logic lives in core::BsNode;
 // this main only wires the UDP radio, drives the timer tick (SIB broadcast),
 // answers the UDP command port (status/quit) and emits heartbeats.
+#include "cn/udp_cn_link.h"
 #include "common/logger.h"
 #include "common/udp_transport.h"
 #include "core/bs_node.h"
@@ -38,6 +39,13 @@ int main(int argc, char* argv[]) {
     uint16_t ue_phy_port = 10001;
     int n_fft = 64;
     int cp_len = 16;
+    // M15: external core-network endpoints (empty = embedded legacy core).
+    std::string amf_addr;
+    uint16_t amf_port = 0;
+    uint16_t ng_local_port = 20110;
+    std::string upf_addr;
+    uint16_t upf_port = 0;
+    uint16_t gu_local_port = 20120;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -47,6 +55,12 @@ int main(int argc, char* argv[]) {
         else if (arg == "--cmd-port" && i + 1 < argc) cmd_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         else if (arg == "--ue-phy-addr" && i + 1 < argc) ue_addr = argv[++i];
         else if (arg == "--ue-phy-port" && i + 1 < argc) ue_phy_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--amf-addr" && i + 1 < argc) amf_addr = argv[++i];
+        else if (arg == "--amf-port" && i + 1 < argc) amf_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--ng-local-port" && i + 1 < argc) ng_local_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--upf-addr" && i + 1 < argc) upf_addr = argv[++i];
+        else if (arg == "--upf-port" && i + 1 < argc) upf_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--gu-local-port" && i + 1 < argc) gu_local_port = static_cast<uint16_t>(std::stoi(argv[++i]));
     }
 
     logging::init("BS", log_host, log_port);
@@ -69,6 +83,32 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, on_signal);
 
     core::BsNode bs;
+
+    // M15: optional split-core wiring. Both links must be given together.
+    cn::UdpCnLink ng_link, gu_link;
+    if (!amf_addr.empty() && amf_port != 0) {
+        if (!ng_link.bind(ng_local_port)) {
+            LOG_ERROR(ev::PHY_BIND_FAIL, {{"port", std::to_string(ng_local_port)}});
+            return 1;
+        }
+        ng_link.set_remote(amf_addr, amf_port);
+        bool have_upf = !upf_addr.empty() && upf_port != 0;
+        if (have_upf) {
+            if (!gu_link.bind(gu_local_port)) {
+                LOG_ERROR(ev::PHY_BIND_FAIL, {{"port", std::to_string(gu_local_port)}});
+                return 1;
+            }
+            gu_link.set_remote(upf_addr, upf_port);
+        }
+        core::BsNode::CnEndpoints ep;
+        ep.amf = &ng_link;
+        ep.upf = have_upf ? &gu_link : nullptr;
+        ep.gnb_cell = 1;
+        bs.attach_core(ep);
+        LOG_INFO(ev::NG_SETUP_RX, {{"mode", "external-amf"},
+                                    {"amf", amf_addr + ":" + std::to_string(amf_port)}});
+    }
+
     const phy::FrameTxConfig frame_cfg{ n_fft, cp_len, /*pci=*/0 };
     bs.set_air_send([&](const std::vector<uint8_t>& bits) {
         std::vector<std::complex<float>> iq = phy::phy_preamble_burst(frame_cfg);
@@ -111,6 +151,12 @@ int main(int argc, char* argv[]) {
                     g_stop = 1;
                 }
             }
+        }
+
+        // M15: drain NG/GTP-like datagrams from the external core.
+        if (!amf_addr.empty()) {
+            while (ng_link.receive(0)) {}
+            while (gu_link.receive(0)) {}
         }
 
         now_ms = monotonic_ms();

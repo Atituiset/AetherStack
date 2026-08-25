@@ -11,6 +11,12 @@ void Upf::handle(const CnMessage& msg) {
             const uint32_t tmsi = get32(msg.value, 0);
             const uint16_t rnti = get16(msg.value, 4);
             auto& r = routes_[tmsi];
+            if (r.rnti != rnti) {
+                // First sighting or a re-route (handover / gNB restart).
+                LOG_INFO(ev::UPF_PATH_SWITCH,
+                         {{"tmsi", std::to_string(tmsi)},
+                          {"rnti", std::to_string(rnti)}});
+            }
             r.rnti = rnti;
             std::vector<uint8_t> pdu(msg.value.begin() + 6, msg.value.end());
             if (ul_sink_) ul_sink_(tmsi, pdu); // demo/test tap (echo etc.)

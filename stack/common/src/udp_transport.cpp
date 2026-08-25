@@ -62,4 +62,43 @@ int UdpTransport::recv(uint8_t* buf, size_t buf_len, int timeout_ms) {
     return recvfrom(sock_fd_, buf, buf_len, flags, nullptr, nullptr);
 }
 
+// M15: capture the sender so a server (AMF/UPF) can reply without having
+// been told the client's address up front.
+int UdpTransport::recv_from(uint8_t* buf, size_t buf_len,
+                            std::string* sender_addr, uint16_t* sender_port,
+                            int timeout_ms) {
+    struct sockaddr_in src{};
+    socklen_t src_len = sizeof(src);
+    int flags = 0;
+    if (timeout_ms <= 0) {
+        flags = MSG_DONTWAIT;
+    } else {
+        struct timeval tv{};
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(sock_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    int n = recvfrom(sock_fd_, buf, buf_len, flags,
+                     reinterpret_cast<struct sockaddr*>(&src), &src_len);
+    if (n > 0) {
+        char ip[INET_ADDRSTRLEN] = {0};
+        inet_ntop(AF_INET, &src.sin_addr, ip, sizeof(ip));
+        if (sender_addr) *sender_addr = ip;
+        if (sender_port) *sender_port = ntohs(src.sin_port);
+        last_sender_ = {ip, ntohs(src.sin_port)};
+    }
+    return n;
+}
+
+bool UdpTransport::reply(const uint8_t* data, size_t len) {
+    if (sock_fd_ < 0 || last_sender_.port == 0) return false;
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(last_sender_.port);
+    inet_pton(AF_INET, last_sender_.addr.c_str(), &addr.sin_addr);
+    ssize_t ret = sendto(sock_fd_, data, len, 0,
+                          reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    return ret == static_cast<ssize_t>(len);
+}
+
 }

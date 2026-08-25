@@ -155,12 +155,15 @@ void Amf::handle(const CnMessage& msg) {
             // Payload after the fixed header is the opaque HO context blob
             // produced by BsNode (key + imsi), forwarded verbatim.
             if (msg.value.size() < 8) break;
+            const uint32_t req_tmsi = get32(msg.value, 0);
             const uint16_t target_cell = get16(msg.value, 4);
             LOG_INFO(ev::HO_TRIGGERED,
                      {{"amf", "1"}, {"to_cell", std::to_string(target_cell)}});
+            (void)req_tmsi;
             // HO_COMMAND to the target gNB carries the same payload; routing
             // by cell id happens in the link layer (each gNB has its own
             // link; the AMF answers on the link it received NG_SETUP_OK ack).
+            ho_target_[req_tmsi] = target_cell;
             std::vector<uint8_t> v = msg.value; // {tmsi}{tgt}++ctx
             send(MsgType::HO_COMMAND, std::move(v));
             break;
@@ -175,6 +178,16 @@ void Amf::handle(const CnMessage& msg) {
             if (it != ue_contexts_.end()) {
                 it->second.serving_rnti = new_rnti;
             }
+            // Relay the allocation to all gNBs: the source needs the new
+            // C-RNTI to send the UE its RRC mobility command. The target
+            // cell rides along so the source recognises its own pending HO.
+            std::vector<uint8_t> v;
+            put32(v, tmsi);
+            auto hit = ho_target_.find(tmsi);
+            put16(v, hit != ho_target_.end() ? hit->second : 0);
+            if (hit != ho_target_.end()) ho_target_.erase(hit);
+            v.insert(v.end(), msg.value.begin() + 4, msg.value.end());
+            send(MsgType::HO_PREPARED, std::move(v));
             break;
         }
 
