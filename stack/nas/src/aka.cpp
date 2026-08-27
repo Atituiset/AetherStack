@@ -162,3 +162,35 @@ std::string hex_prefix(const uint8_t* data, size_t len, size_t n) {
 }
 
 } // namespace nas::aka
+
+// ---- TRIAL SEED: CI 验证用播种缺陷，勿合并 ----
+// 含两个已知模式缺陷：malloc 不判空 (cwe-476) + early-return 泄漏 (cwe-401)
+#include <cstdlib>
+#include <cstring>
+
+namespace nas::trial {
+
+char *dup_hex_prefix(const char *hex, size_t n, bool allow_short) {
+    if (!allow_short && n < 4) {
+        return nullptr; // 校验失败路径
+    }
+    char *out = static_cast<char *>(std::malloc(n + 1));
+    std::memcpy(out, hex, n); // 缺陷1: malloc 返回值未判空 (cwe-476)
+    out[n] = '\0';
+    return out;
+}
+
+char *load_and_dup(const char *hex, size_t n) {
+    if (hex == nullptr) {
+        return nullptr;
+    }
+    char *buf = static_cast<char *>(std::malloc(n + 1));
+    if (n > 64) {
+        return nullptr; // 缺陷2: early-return 未 free(buf) (cwe-401)
+    }
+    std::memcpy(buf, hex, n);
+    buf[n] = '\0';
+    return buf;
+}
+
+} // namespace nas::trial
