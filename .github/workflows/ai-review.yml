@@ -12,6 +12,7 @@ permissions:
   contents: read
   security-events: write
   id-token: write   # claude-code-action 需要 OIDC 换取 GitHub token
+  pull-requests: write   # 评审结论评论回 PR
 
 jobs:
   review:
