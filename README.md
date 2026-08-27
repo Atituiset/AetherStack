@@ -46,24 +46,42 @@ banner):
 ./start_demo.sh --with-demo --loss-rate 0.05
 ```
 
-`Ctrl+C` tears down every component.
-
-### Driving the UE by hand
-
-Type commands into the UE's stdin, or send them via UDP (what the LMT and
-the demo driver use):
+Differentiated per-UE radio links (drives CQI→MCS link adaptation and TX
+power control; see the LMT signal bars):
 
 ```bash
-echo attach | nc -u -w1 127.0.0.1 10101
+./start_demo.sh --ue-quality 10001=good,10002=mid,10003=poor
+```
+
+`Ctrl+C` tears down every component.
+
+### Driving the UEs by hand
+
+The demo starts two UEs (UE1 on command port 10101, UE2 on 10103). Type
+commands into a UE's stdin, or send them via UDP (what the LMT and the demo
+driver use):
+
+```bash
+echo attach | nc -u -w1 127.0.0.1 10101        # UE1
+echo attach | nc -u -w1 127.0.0.1 10103        # UE2
 echo "traffic on" | nc -u -w1 127.0.0.1 10101
 ```
 
-Commands: `attach` `detach` `send <text>` `traffic on|off` `stats` `status`.
+Commands: `attach` `detach` `send <text>` `traffic on|off` `stats` `status`
+plus UE-to-UE: `msg <imsi> <text>`, `call <imsi>` / `video <imsi>` (SIP-lite
+INVITE), `answer` / `decline` (a ringing call), `call end` / `video end`
+(BYE/CANCEL), `conf <imsiB> <imsiC>` / `conf end` (3-party conference, BS
+audio bridge; participants leave with `call end`), `sleep` / `wake`
+(RRC_INACTIVE suspend on demand / fast resume; idle UEs also suspend
+automatically after 15 s and resume on any activity), `autoanswer <ms>|off`
+(default 4 s). Media classes run on QoS-differentiated bearers (QCI5 sig >
+QCI1 voice > QCI2 video > QCI9 best-effort; concurrent voice+video calls
+supported).
 
 ## Tests & verification
 
 ```bash
-make test                       # 136 unit/E2E tests (gtest)
+make test                       # 179 unit/E2E tests (gtest)
 cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DAETHER_SANITIZE=ON \
   && cmake --build build-asan -j && (cd build-asan && ctest)   # ASan+UBSan
 python3 tools/scripts/check_events_sync.py      # event catalog C++<->TS mirror
@@ -126,8 +144,10 @@ tools/
 
 | Port | Purpose |
 |------|---------|
-| 10001 / 20002 | UE / BS PHY (IQ datagrams) |
-| 11001 / 21002 | Channel simulator uplink / downlink ingress |
-| 10101 / 10102 | UE / BS command channels |
+| 10001-10003 / 20002, 20003 | UE1-3 / BS1, BS2 PHY (IQ datagrams) |
+| 11001 / 21002, 21003 | Channel simulator uplink / per-cell downlink ingress (each fans out to all UEs) |
+| 10101, 10103, 10104 / 10102, 10106 | UE1-3 / BS1, BS2 command channels |
+| 20201 / 20202 | Xn link BS1 <-> BS2 (handover + cross-cell U2U) |
+| 11009 | Channel simulator mobility control (`move <ue_port> <cell>`) |
 | 9999 / 8765 | Log server UDP in / WebSocket out |
 | 3000 | Web LMT (Vite dev server) |
