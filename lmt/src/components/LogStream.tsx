@@ -1,13 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { LogEvent } from '../hooks/useWebSocket'
+import { nodeOf, NODE_LABEL, NODE_COLOR } from '../nodes'
+import ev from '../events'
+import { PduEntry, pduFromEvent } from './PduDetail'
 
 interface LogStreamProps {
   messages: LogEvent[]
   clearMessages: () => void
+  onOpenPdu?: (p: PduEntry) => void
 }
 
-export const LogStream: React.FC<LogStreamProps> = ({ messages, clearMessages }) => {
-  const [filterModule, setFilterModule] = useState<'ALL' | 'UE' | 'BS'>('ALL')
+export const LogStream: React.FC<LogStreamProps> = ({ messages, clearMessages, onOpenPdu }) => {
+  const [filterNode, setFilterNode] = useState<'ALL' | 'ue1' | 'ue2' | 'ue3' | 'bs'>('ALL')
   const [filterLevel, setFilterLevel] = useState<'ALL' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'>('ALL')
   const [searchTerm, setSearchTerm] = useState('')
   const [autoScroll, setAutoScroll] = useState(true)
@@ -15,7 +19,7 @@ export const LogStream: React.FC<LogStreamProps> = ({ messages, clearMessages })
   const endRef = useRef<HTMLDivElement>(null)
 
   const filtered = messages.filter((msg) => {
-    if (filterModule !== 'ALL' && msg.module !== filterModule) return false
+    if (filterNode !== 'ALL' && nodeOf(msg) !== filterNode) return false
     if (filterLevel !== 'ALL' && msg.level !== filterLevel) return false
     if (searchTerm) {
       const term = searchTerm.toLowerCase()
@@ -43,10 +47,18 @@ export const LogStream: React.FC<LogStreamProps> = ({ messages, clearMessages })
     }
   }
 
-  const moduleBadge = (mod: string): React.CSSProperties => {
-    if (mod === 'UE') return { background: 'rgba(16,185,129,0.15)', color: '#34d399' }
-    if (mod === 'BS') return { background: 'rgba(59,130,246,0.15)', color: '#60a5fa' }
+  const nodeBadge = (msg: LogEvent): React.CSSProperties => {
+    const node = nodeOf(msg)
+    if (node) {
+      const c = NODE_COLOR[node]
+      return { background: `${c}22`, color: c }
+    }
     return { background: 'rgba(107,114,128,0.15)', color: '#9ca3af' }
+  }
+
+  const nodeTag = (msg: LogEvent): string => {
+    const node = nodeOf(msg)
+    return node ? NODE_LABEL[node] : msg.module || 'SYS'
   }
 
   return (
@@ -73,10 +85,12 @@ export const LogStream: React.FC<LogStreamProps> = ({ messages, clearMessages })
       {/* Filters */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 16px', borderBottom: '1px solid var(--border-color)', background: '#0a0f18', gap: 12 }}>
         <div style={{ display: 'flex', gap: 8 }}>
-          <select value={filterModule} onChange={(e) => setFilterModule(e.target.value as any)} style={selectStyle}>
+          <select value={filterNode} onChange={(e) => setFilterNode(e.target.value as any)} style={selectStyle}>
             <option value="ALL">All Nodes</option>
-            <option value="UE">UE Only</option>
-            <option value="BS">BS Only</option>
+            <option value="ue1">UE1 Only</option>
+            <option value="ue2">UE2 Only</option>
+            <option value="ue3">UE3 Only</option>
+            <option value="bs">gNB Only</option>
           </select>
           <select value={filterLevel} onChange={(e) => setFilterLevel(e.target.value as any)} style={selectStyle}>
             <option value="ALL">All Levels</option>
@@ -104,11 +118,17 @@ export const LogStream: React.FC<LogStreamProps> = ({ messages, clearMessages })
         ) : (
           filtered.map((msg, i) => {
             const time = msg.timestamp ? msg.timestamp.split('T')[1]?.replace('Z', '') : ''
+            const isPdu = msg.event === ev.PDU_TRACE
             return (
-              <div key={i} style={{ display: 'flex', gap: 10, padding: '3px 0', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'flex-start' }}>
+              <div
+                key={msg._seq ?? i}
+                onClick={() => isPdu && onOpenPdu?.(pduFromEvent(msg))}
+                title={isPdu ? 'Open PDU detail' : undefined}
+                style={{ display: 'flex', gap: 10, padding: '3px 0', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'flex-start', cursor: isPdu ? 'pointer' : 'default' }}
+              >
                 <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{time}</span>
-                <span style={{ padding: '1px 6px', borderRadius: 4, fontWeight: 'bold', fontSize: 11, width: 40, textAlign: 'center', whiteSpace: 'nowrap', ...moduleBadge(msg.module) }}>
-                  {msg.module}
+                <span style={{ padding: '1px 6px', borderRadius: 4, fontWeight: 'bold', fontSize: 11, width: 40, textAlign: 'center', whiteSpace: 'nowrap', ...nodeBadge(msg) }}>
+                  {nodeTag(msg)}
                 </span>
                 <span style={{ width: 55, fontWeight: 600, ...levelColor(msg.level) }}>{msg.level}</span>
                 <span style={{ color: '#e5e7eb', fontWeight: 'bold', minWidth: 150 }}>{msg.event}</span>

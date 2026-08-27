@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "outDir": ".out",
+    "rootDir": "..",
+    "types": []
+  },
+  "include": ["derive.test.ts", "../src/services.ts", "../src/nodes.ts", "../src/hooks/useWebSocket.ts"]
+}

@@ -28,3 +28,12 @@ html, body, #root {
   border: 1px solid var(--border-color);
   border-radius: 12px;
 }
+
+@keyframes lmt-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.72); }
+}
+
+.lmt-pulse {
+  animation: lmt-pulse 1.2s ease-in-out infinite;
+}

@@ -11,11 +11,12 @@ interface FsmViewerProps {
 }
 
 const MAC_STATES = ['IDLE', 'WAIT_RAR', 'WAIT_CR', 'CONNECTED']
-const RRC_STATES = ['IDLE', 'CONNECTING', 'CONNECTED']
+const RRC_STATES = ['IDLE', 'CONNECTING', 'CONNECTED', 'INACTIVE']
 const NAS_STATES = ['DEREGISTERED', 'REGISTERING', 'REGISTERED']
 
 const stateColor = (current: string, candidate: string) => {
-  if (current === candidate) return '#10b981'
+  // suspended reads as amber, everything else active green
+  if (current === candidate) return candidate === 'INACTIVE' ? '#f59e0b' : '#10b981'
   return '#1f2937'
 }
 
@@ -30,8 +31,8 @@ const FsmRow: React.FC<{ label: string; states: string[]; current: string }> = (
             padding: '3px 8px',
             borderRadius: 4,
             fontSize: 10,
-            fontWeight: stateColor(current, s) === '#10b981' ? 800 : 500,
-            background: stateColor(current, s) === '#10b981' ? 'rgba(16,185,129,0.15)' : 'rgba(31,41,55,0.5)',
+            fontWeight: current === s ? 800 : 500,
+            background: current === s ? `${stateColor(current, s)}26` : 'rgba(31,41,55,0.5)',
             color: stateColor(current, s),
             border: `1px solid ${stateColor(current, s)}22`,
             transition: 'all 0.3s ease',

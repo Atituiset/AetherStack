@@ -67,6 +67,20 @@ export const PduDetail: React.FC<PduDetailProps> = ({ pdu, onClose }) => {
   )
 }
 
+/** Build a PduEntry from a raw PDU_TRACE event (shared by store, chips, log rows). */
+export function pduFromEvent(e: LogEvent): PduEntry {
+  return {
+    id: `${e._seq ?? e.timestamp}`,
+    seq: e._seq ?? 0,
+    timestamp: e.timestamp,
+    direction: e.fields.direction || '?',
+    layer: e.fields.layer || '?',
+    hex: e.fields.hex || '',
+    brief: e.fields.brief || '',
+    raw: e,
+  }
+}
+
 /**
  * PDU store fed incrementally by server-side `_seq` (M6.5 D6): each event is
  * processed exactly once even though the message window slides.
@@ -82,21 +96,7 @@ export function usePduStore() {
     )
     if (fresh.length === 0) return
     lastSeqRef.current = Math.max(...fresh.map((e) => e._seq!), lastSeqRef.current)
-    setPdus((prev) =>
-      [
-        ...prev,
-        ...fresh.map((e) => ({
-          id: `${e._seq}`,
-          seq: e._seq!,
-          timestamp: e.timestamp,
-          direction: e.fields.direction || '?',
-          layer: e.fields.layer || '?',
-          hex: e.fields.hex || '',
-          brief: e.fields.brief || '',
-          raw: e,
-        })),
-      ].slice(-200),
-    )
+    setPdus((prev) => [...prev, ...fresh.map(pduFromEvent)].slice(-200))
   }, [])
 
   return { pdus, selectedPdu, setSelectedPdu, addEvents }

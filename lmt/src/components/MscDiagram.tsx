@@ -1,6 +1,7 @@
 import React, { useRef } from 'react'
-import ev, { MSC_UPLINK, MSC_DOWNLINK } from '../events'
+import { MSC_UPLINK, MSC_DOWNLINK } from '../events'
 import { LogEvent } from '../hooks/useWebSocket'
+import { nodeOf, NODE_LABEL, NODE_COLOR } from '../nodes'
 
 interface MscDiagramProps {
   messages: LogEvent[]
@@ -32,12 +33,15 @@ export const MscDiagram: React.FC<MscDiagramProps> = ({ messages }) => {
             const isUplink = !!MSC_UPLINK[msg.event as keyof typeof MSC_UPLINK]
             const time = msg.timestamp ? msg.timestamp.split('T')[1]?.replace('Z', '') : ''
             const crnti = msg.fields?.c_rnti ? ` [${msg.fields.c_rnti}]` : ''
+            const node = nodeOf(msg)
+            const tag = node ? NODE_LABEL[node] : msg.module
+            const tagColor = node ? NODE_COLOR[node] : '#374151'
             return (
               <div key={`${msg._seq ?? i}-${msg.event}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.02)' }}>
                 <span style={{ color: '#4b5563', width: 80, flexShrink: 0 }}>{time}</span>
+                <span style={{ color: tagColor, width: 30, flexShrink: 0, fontWeight: 700, fontSize: 10 }}>{tag}</span>
                 <span style={{ color: isUplink ? '#34d399' : '#60a5fa', width: 20, textAlign: 'center' }}>{isUplink ? '→' : '←'}</span>
                 <span style={{ color: '#e5e7eb', fontWeight: 600 }}>{label}{crnti}</span>
-                <span style={{ color: '#374151', marginLeft: 'auto', fontSize: 10 }}>{msg.module}</span>
               </div>
             )
           })
@@ -46,8 +50,5 @@ export const MscDiagram: React.FC<MscDiagramProps> = ({ messages }) => {
     </div>
   )
 }
-
-// keep the constant import referenced for consumers wanting raw lookup
-void ev
 
 export default MscDiagram

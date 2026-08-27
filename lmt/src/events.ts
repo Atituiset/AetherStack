@@ -75,10 +75,10 @@ export const ev = {
   NAS_DETACH_IGNORED: 'NAS_DETACH_IGNORED',
 
   // Security (M12)
-  NAS_AUTH_CHALLENGE_TX: 'NAS_AUTH_CHALLENGE_TX',
-  NAS_AUTH_RESPONSE_TX: 'NAS_AUTH_RESPONSE_TX',
-  NAS_AUTH_OK: 'NAS_AUTH_OK',
-  NAS_AUTH_FAIL: 'NAS_AUTH_FAIL',
+  NAS_AUTH_VECTOR: 'NAS_AUTH_VECTOR', // BS {imsi, rand, sqn_masked} — M21 AKA
+  NAS_AUTH_RES: 'NAS_AUTH_RES', // UE {imsi, res}
+  NAS_AUTH_SUCCESS: 'NAS_AUTH_SUCCESS', // BS {imsi}
+  NAS_AUTH_FAIL: 'NAS_AUTH_FAIL', // UE/BS {imsi, cause}: mac|synch|res_mismatch
   NAS_AUTH_RESP_UNKNOWN: 'NAS_AUTH_RESP_UNKNOWN',
   NAS_AUTH_REQ_IGNORED: 'NAS_AUTH_REQ_IGNORED',
   SEC_ENABLED: 'SEC_ENABLED',
@@ -129,6 +129,55 @@ export const ev = {
   TRAFFIC_START: 'TRAFFIC_START', // {interval_ms}
   TRAFFIC_STOP: 'TRAFFIC_STOP',
   TRAFFIC_STATS: 'TRAFFIC_STATS', // {tx, rx, loss, rtt_min, rtt_max, rtt_avg}
+
+  // UE-to-UE media (M16): kind in "voice" | "video" | "msg"; src/dst are IMSIs
+  APP_MSG_TX: 'APP_MSG_TX', // UE {dst, text}
+  APP_MSG_RX: 'APP_MSG_RX', // UE {src, text}
+  APP_CALL_START: 'APP_CALL_START', // UE {dst, kind} — M17: at INVITE
+  APP_CALL_END: 'APP_CALL_END', // UE {dst, kind} — M17: BYE/CANCEL sent
+  APP_CALL_INCOMING: 'APP_CALL_INCOMING', // UE {src, kind} — M17: at INVITE/ringing
+  APP_CALL_PEER_END: 'APP_CALL_PEER_END', // UE {src, kind} — M17: BYE/CANCEL received
+  APP_FORWARD: 'APP_FORWARD', // BS {src, dst, kind, bytes, count}
+  APP_STREAM_STATS: 'APP_STREAM_STATS', // UE {kind, peer, tx, rx, loss, rtt_avg, qci[, conf_id]} — M18: kind "conf" for conference streams
+
+  // SIP-lite call control (M17): dialog idle->INVITE->ringing->200+ACK->established->BYE
+  SIP_INVITE_TX: 'SIP_INVITE_TX', // UE caller {dst, kind}
+  SIP_INVITE_RX: 'SIP_INVITE_RX', // UE callee {src, kind}
+  SIP_RINGING_TX: 'SIP_RINGING_TX', // UE callee {dst}
+  SIP_RINGING_RX: 'SIP_RINGING_RX', // UE caller {src}
+  SIP_CALL_ESTABLISHED: 'SIP_CALL_ESTABLISHED', // UE {peer, kind}
+  SIP_CALL_FAILED: 'SIP_CALL_FAILED', // UE {peer, reason}: busy|declined|unreachable|timeout|cancel
+  SIP_BYE_TX: 'SIP_BYE_TX', // UE {peer}
+  SIP_BYE_RX: 'SIP_BYE_RX', // UE {peer}
+
+  // QoS dedicated bearers (M17): kind in "sig" | "voice" | "video"
+  QOS_BEARER_SETUP: 'QOS_BEARER_SETUP', // UE/BS {c_rnti, qci, kind}
+  QOS_BEARER_TEARDOWN: 'QOS_BEARER_TEARDOWN', // UE/BS {c_rnti, qci, kind}
+
+  // 3-party conference, audio bridge at the BS (M18)
+  CONF_START: 'CONF_START', // BS {host, conf_id}
+  CONF_JOIN: 'CONF_JOIN', // BS {conf_id, imsi}
+  CONF_LEAVE: 'CONF_LEAVE', // BS {conf_id, imsi, reason}: hangup|busy|decline|cancel|detach
+  CONF_END: 'CONF_END', // BS {conf_id, reason}: host|empty|no-parties
+
+  // M19: link adaptation / TX power control / signal quality
+  CQI_REPORT: 'CQI_REPORT', // BS {c_rnti, cqi, snr_db} — change-only
+  MCS_CHANGE: 'MCS_CHANGE', // BS {c_rnti, mcs, direction}
+  TX_POWER_CHANGE: 'TX_POWER_CHANGE', // UE {c_rnti, dbm} — >=0.5 dB, >=1 s
+  LINK_QUALITY: 'LINK_QUALITY', // UE {c_rnti, rsrp, sinr} — ~1/s
+
+  RACH_PREAMBLE_FOREIGN_CELL: 'RACH_PREAMBLE_FOREIGN_CELL', // BS {preamble, cell} (debug)
+  RRC_SETUP_FOREIGN_CELL: 'RRC_SETUP_FOREIGN_CELL', // BS {target|resume_id, cell} (debug)
+
+  // M22: dual-BS mobility handover
+  HANDOVER_START: 'HANDOVER_START', // BS {imsi, from, to}
+  HANDOVER_DONE: 'HANDOVER_DONE', // BS {imsi, from, to, path}: path=ho|reest
+
+  // M20: RRC_INACTIVE + fast resume
+  RRC_INACTIVE: 'RRC_INACTIVE', // UE/BS {c_rnti, resume_id}
+  RRC_RESUME_REQUEST: 'RRC_RESUME_REQUEST', // UE {resume_id} / BS {resume_id, c_rnti}
+  RRC_RESUMED: 'RRC_RESUMED', // UE/BS {c_rnti, old_c_rnti}
+  RRC_RESUME_FAIL: 'RRC_RESUME_FAIL', // BS {resume_id, reason} / UE {reason}
 
   // PDU inspector: fields {layer, direction, len, hex, brief}
   PDU_TRACE: 'PDU_TRACE',
