@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   security-events: write
+  id-token: write   # claude-code-action 需要 OIDC 换取 GitHub token
 
 jobs:
   review:
