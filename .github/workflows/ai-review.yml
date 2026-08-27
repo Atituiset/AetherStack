@@ -1,6 +1,6 @@
-# AI Review Gate — PR 评审 + SARIF 上传（模板）
-# 安装：复制到目标仓 .github/workflows/ai-review.yml，并配置 secrets（见 docs/ci-setup.md）
-# 行为约定（MVP 设计）：diff <20 行或纯文档豁免跳过；评审失败不阻塞 PR（fail-open）。
+# AI Review Gate — 目标仓 caller 模板
+# 安装：复制本文件到目标仓 .github/workflows/ai-review.yml（详见 docs/ci-setup.md）
+# 评审逻辑全部在 Atituiset/agent-reviewer 的可复用 workflow 中，此处仅为引用。
 
 name: ai-review
 
@@ -10,74 +10,9 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # upload-sarif 需要
+  security-events: write
 
 jobs:
   review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Checkout agent-reviewer（场景库 + scripts）
-        uses: actions/checkout@v4
-        with:
-          repository: Atituiset/agent-reviewer
-          path: .reviewer
-
-      - name: 变更规模与豁免判定
-        id: gate
-        run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          STATS=$(git diff --numstat "$BASE"...HEAD | awk '{a+=$1; d+=$2} END {print a+d}')
-          DOC_ONLY=$(git diff --name-only "$BASE"...HEAD | grep -vcE '\.(md|txt)$|^docs/' || true)
-          if [ "${STATS:-0}" -lt 20 ]; then echo "skip=small" >> "$GITHUB_OUTPUT";
-          elif [ "$DOC_ONLY" = "0" ]; then echo "skip=docs" >> "$GITHUB_OUTPUT";
-          else echo "skip=" >> "$GITHUB_OUTPUT"; fi
-
-      - name: 打包评审输入（diff + 场景路由 + 记忆召回）
-        if: steps.gate.outputs.skip == ''
-        run: |
-          git diff "${{ github.event.pull_request.base.sha }}"...HEAD > /tmp/pr.diff
-          cd .reviewer && bash scripts/setup-env.sh || true
-
-      - name: 场景评审（Claude Code，按 SKILL 清单产出工件）
-        if: steps.gate.outputs.skip == ''
-        id: review
-        continue-on-error: true   # fail-open：评审失败不阻塞 PR
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            你是 task-reviewer。读取 /tmp/pr.diff 与 .reviewer/rules/registry.json：
-            1. 用 .reviewer/scripts/_lib.py scenarios-for 对 diff 触及的每个文件做场景路由
-            2. 对每个命中场景，读 .reviewer/rules/scenarios/<key>/SKILL.md 清单逐项评审
-               （需要深入项时读 references/detailed-checks.md）
-            3. 纪律：只报有 file:line 证据的具体缺陷；置信度 ≥80 才报；风格问题不报
-            4. 将结果写为 .review/review-artifact.json，schema：
-               {diff_hash(对 /tmp/pr.diff 的 sha256), verdict(CLEAN|ISSUES_FOUND),
-                reviewed_at(ISO8601), reviewer:"ci-task-reviewer", spec_ref:"none",
-                findings:[{file,line,severity(critical|important|minor),category,
-                           scenario(必须是 registry 中存在的场景键),summary,detail,
-                           confidence,resolved:false}]}
-
-      - name: 工件 → SARIF 并上传 code scanning
-        if: steps.gate.outputs.skip == '' && steps.review.outcome == 'success'
-        run: |
-          cd .reviewer && bash scripts/artifact-to-sarif.sh "$GITHUB_WORKSPACE/.review/review-artifact.json" "$GITHUB_WORKSPACE/.review/review.sarif"
-
-      - uses: github/codeql-action/upload-sarif@v3
-        if: steps.gate.outputs.skip == '' && steps.review.outcome == 'success'
-        with:
-          sarif_file: .review/review.sarif
-          category: agent-reviewer
-
-      - name: 豁免/失败说明（fail-open 留痕）
-        if: always()
-        run: |
-          if [ -n "${{ steps.gate.outputs.skip }}" ]; then
-            echo "ai-review skipped: ${{ steps.gate.outputs.skip }}（豁免）"
-          elif [ "${{ steps.review.outcome }}" != "success" ]; then
-            echo "ai-review failed but not blocking（fail-open）"
-          fi
+    uses: Atituiset/agent-reviewer/.github/workflows/ai-review-reusable.yml@mvp
+    secrets: inherit
