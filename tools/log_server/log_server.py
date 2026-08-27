@@ -10,8 +10,9 @@ WebSocket.
   has its oldest entries dropped (with a drop counter) instead of blocking
   the fan-out or growing memory unboundedly.
 * Command channel: JSON text frames sent by LMT clients of the shape
-  {"target": "ue"|"bs", "cmd": "<line>"} are forwarded as raw UDP lines to
-  the node command ports (UE 10101 / BS 10102).
+  {"target": "ue"|"ue1"|"ue2"|"ue3"|"bs", "cmd": "<line>"} are forwarded as raw
+  UDP lines to the node command ports (UE1 10101 / UE2 10103 / UE3 10104 / BS 10102).
+  "ue" is kept as an alias for "ue1".
 """
 
 import asyncio
@@ -22,7 +23,8 @@ import websockets
 
 UDP_PORT = 9999
 WS_PORT = 8765
-CMD_PORTS = {"ue": 10101, "bs": 10102}
+CMD_PORTS = {"ue": 10101, "ue1": 10101, "ue2": 10103, "ue3": 10104,
+             "bs": 10102, "bs1": 10102, "bs2": 10106}
 QUEUE_LIMIT = 512  # max buffered messages per WS client
 
 
@@ -151,7 +153,7 @@ async def main():
 
     async with websockets.serve(ws_handler, "0.0.0.0", WS_PORT):
         print(f"[LogServer] WebSocket server on ws://localhost:{WS_PORT}")
-        print(f"[LogServer] command channel -> UE:{CMD_PORTS['ue']} BS:{CMD_PORTS['bs']}")
+        print(f"[LogServer] command channel -> UE1:{CMD_PORTS['ue1']} UE2:{CMD_PORTS['ue2']} UE3:{CMD_PORTS['ue3']} BS:{CMD_PORTS['bs']}")
         await asyncio.Future()  # run forever
 
 

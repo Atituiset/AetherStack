@@ -67,7 +67,7 @@ TEST(FullAttach, ColdStartToRegistered) {
 
     auto& msg4 = bs_to_ue[1].data;
     uint16_t crnti = msg4[1] | (msg4[2] << 8);
-    rach_ue.on_contention_resolve(crnti);
+    rach_ue.on_contention_resolve(crnti, ra_rnti);
     EXPECT_EQ(rach_ue.state(), RachState::CONNECTED);
 
     // Step 3: RRC Connection Setup

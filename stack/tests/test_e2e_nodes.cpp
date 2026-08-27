@@ -8,8 +8,11 @@
 #include "cn/upf.h"
 #include "mac/mac_pdu.h"
 #include "rrc/rrc_messages.h"
+#include "nas/aka.h"
+#include "pdcp/pdcp_entity.h"
 #include <gtest/gtest.h>
 #include <array>
+#include <functional>
 #include <random>
 
 namespace {
@@ -188,7 +191,11 @@ TEST(E2eNodes, TrafficSurvivesAirBlackout) {
     EXPECT_GT(link.ue.app_rx_count(), rx_before);   // resumed after restore
     // Every ping is either delivered or accounted as lost; HARQ may rescue
     // some blackout pings via timeout retransmissions after restore.
-    EXPECT_GE(link.ue.app_rx_count(), 90u);         // clean + post-restore
+    // M16.1: the DL AM window is now 64 deep (bounded staleness) and the
+    // transmitter refuses new SDUs when congestion fills it, so a handful
+    // of post-restore echoes can be counted as loss instead of delivered —
+    // the full-accounting equality below remains the strong invariant.
+    EXPECT_GE(link.ue.app_rx_count(), 85u);         // clean + post-restore
     EXPECT_LE(link.ue.app_rx_count(), 130u);        // upper bound: all pings
     EXPECT_EQ(link.ue.app_rx_count() + link.ue.app_loss_count(),
               link.ue.app_tx_count());              // full accounting
@@ -273,6 +280,8 @@ TEST(E2eNodes, HarqRescuesTwentyPercentFrameLoss) {
     ue.start_traffic(50);
     pump(4000);
     ue.stop_traffic();
+    pump(1500); // flush the tail: 250 ms HARQ timeout (M16.1) rescues
+                // slowly but surely instead of firing early under load
 
     printf("[diag] dropped=%u tx=%u rx=%u loss=%u\n", dropped,
            ue.app_tx_count(), ue.app_rx_count(), ue.app_loss_count());
@@ -351,10 +360,1186 @@ TEST(E2eNodes, TwoUesConcurrentAttachAndTraffic) {
     EXPECT_FALSE(bs.ue_connected(ue1.crnti()));
 }
 
+TEST(E2eNodes, UeToUeMessageAndVoiceCall) {
+    // M16: two attached UEs exchange user-plane traffic through the BS.
+    // ue1 texts ue2 (exact payload must survive the full stack), then runs
+    // a short voice call: media flows ue1 -> BS -> ue2, acks flow back.
+    core::BsNode bs;
+    core::UeNodeConfig c1; c1.imsi = "460011234567890";
+    core::UeNodeConfig c2; c2.imsi = "460011234567891";
+    core::UeNode ue1(c1), ue2(c2);
+
+    ue1.set_air_send([&](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+    ue2.set_air_send([&](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+    bs.set_air_send([&](const std::vector<uint8_t>& b) {
+        ue1.on_air_bits(b);
+        ue2.on_air_bits(b);
+    });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue1.tick(clock);
+            ue2.tick(clock);
+            bs.tick(clock);
+        }
+    };
+    auto pump_until = [&](auto pred, uint32_t max_ms) {
+        for (uint32_t e = 0; e < max_ms && !pred(); e += 10) pump(10);
+        return pred();
+    };
+
+    pump(10);
+    bs.start_broadcast();
+    ue1.attach();
+    ASSERT_TRUE(pump_until([&] { return ue1.registered(); }, 400));
+    ue2.attach();
+    ASSERT_TRUE(pump_until([&] { return ue2.registered(); }, 400));
+
+    // --- one-shot text message -------------------------------------------
+    ue1.send_msg("460011234567891", "hello-from-ue1");
+    ASSERT_TRUE(pump_until([&] { return ue2.msg_rx_count() == 1; }, 400));
+    EXPECT_EQ(ue2.last_msg_src(), "460011234567890");
+    EXPECT_EQ(ue2.last_msg_text(), "hello-from-ue1");
+    EXPECT_EQ(ue1.msg_rx_count(), 0u);          // no crosstalk/echo back
+    EXPECT_EQ(ue2.app_rx_count(), 0u);          // not a legacy pong
+
+    // --- short voice call: full SIP-lite dialog (M17) ----------------------
+    ue2.set_autoanswer(0); // deterministic: answer explicitly in tests
+    ue1.start_call(app::MediaKind::VOICE, "460011234567891");   // INVITE
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 2; }, 400));
+    EXPECT_EQ(ue2.call_peer(), "460011234567890"); // ringing, no media yet
+    EXPECT_EQ(ue1.call_state(), 1);
+    EXPECT_EQ(ue2.stream_rx_count(), 0u);
+    ue2.answer();                                            // 200 OK
+    ASSERT_TRUE(pump_until([&] { return ue1.call_state() == 3; }, 400));
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 3; }, 400));
+    ASSERT_TRUE(pump_until([&] { return ue2.incoming_call_active(); }, 400));
+    EXPECT_EQ(ue2.incoming_peer(), "460011234567890");
+    pump(2000); // ~66 media packets at 30 ms intervals
+    EXPECT_GT(ue1.stream_tx_count(), 50u);
+    EXPECT_GT(ue2.stream_rx_count(), 50u);
+    EXPECT_EQ(ue2.stream_loss_count(), 0u);     // clean in-memory channel
+    EXPECT_GT(ue1.ack_rx_count(), 50u);         // acks made it back
+    EXPECT_GE(ue1.stream_rtt_avg_ms(), 0);
+
+    // Hang up: BYE both ways, ue2 sees the peer-end and the dialog clears.
+    ue1.end_call();
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 0; }, 400));
+    EXPECT_FALSE(ue1.call_active());
+    EXPECT_FALSE(ue2.incoming_call_active());
+
+    // Unknown destination falls back to the legacy echo behaviour.
+    ue1.send_msg("460010000000000", "no-such-ue");
+    pump(100);
+    EXPECT_EQ(ue2.msg_rx_count(), 1u);          // not delivered to ue2
+    EXPECT_EQ(ue1.msg_rx_count(), 0u);          // own echo is not consumed
+
+    // Loopback ping-pong still works alongside the U2U machinery.
+    const uint32_t rx_before = ue1.app_rx_count();
+    ue1.send_app_data({'P'});
+    pump(100);
+    EXPECT_EQ(ue1.app_rx_count(), rx_before + 1);
+
+    ue1.detach();
+    ue2.detach();
+    pump(40);
+}
+
+TEST(E2eNodes, UeToUeVoiceBlackoutRecoversAndLoopbackSurvives) {
+    // M16.1 regression: an uplink blackout far longer than the AM TX window
+    // (64 PDUs = ~1.3 s of voice) must not permanently wedge the bearer.
+    // Pre-fix behaviour: the sender shed the oldest unacked PDUs, the BS
+    // reassembly waited for them forever, and BOTH the media path and the
+    // legacy loopback (same AM bearer) stopped delivering for good.
+    core::BsNode bs;
+    core::UeNodeConfig c1; c1.imsi = "460011234567890";
+    core::UeNodeConfig c2; c2.imsi = "460011234567891";
+    core::UeNode ue1(c1), ue2(c2);
+
+    bool blackout = false;
+    ue1.set_air_send([&](const std::vector<uint8_t>& b) {
+        if (!blackout) bs.on_air_bits(b);
+    });
+    ue2.set_air_send([&](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+    bs.set_air_send([&](const std::vector<uint8_t>& b) {
+        ue1.on_air_bits(b);
+        ue2.on_air_bits(b);
+    });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue1.tick(clock);
+            ue2.tick(clock);
+            bs.tick(clock);
+        }
+    };
+    auto pump_until = [&](auto pred, uint32_t max_ms) {
+        for (uint32_t e = 0; e < max_ms && !pred(); e += 10) pump(10);
+        return pred();
+    };
+
+    pump(10);
+    bs.start_broadcast();
+    ue1.attach();
+    ASSERT_TRUE(pump_until([&] { return ue1.registered(); }, 400));
+    ue2.attach();
+    ASSERT_TRUE(pump_until([&] { return ue2.registered(); }, 400));
+
+    // Voice call runs cleanly (SIP dialog), then ue1's uplink blacks out
+    // for 12 s.
+    ue2.set_autoanswer(0);
+    ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 2; }, 400));
+    ue2.answer();
+    ASSERT_TRUE(pump_until([&] { return ue2.stream_rx_count() > 10; }, 1000));
+    const uint32_t rx_before = ue2.stream_rx_count();
+    blackout = true;
+    pump(12000); // window fills + shedding wedge under the pre-fix code
+    blackout = false;
+
+    // The bearer must heal: media delivery resumes towards ue2 after a
+    // short (window-bounded) backlog; the packets refused while the window
+    // was full surface as a seq gap once the backlog drains.
+    ASSERT_TRUE(pump_until(
+        [&] { return ue2.stream_rx_count() > rx_before + 50; }, 8000));
+    // Graceful degradation: the blackout-era loss is accounted (seq gap),
+    // not silently hidden — and delivery catches up to live quickly.
+    ASSERT_TRUE(pump_until([&] { return ue2.stream_loss_count() > 0; },
+                           8000));
+
+    // Hang up, then prove the legacy loopback on the same bearer recovers.
+    ue1.end_call();
+    ASSERT_TRUE(pump_until([&] { return !ue2.incoming_call_active(); }, 3000));
+    const uint32_t pong_before = ue1.app_rx_count();
+    ue1.send_app_data({'P'});
+    ASSERT_TRUE(pump_until(
+        [&] { return ue1.app_rx_count() > pong_before; }, 1000));
+
+    ue1.detach();
+    ue2.detach();
+    pump(40);
+}
+
+// ---- M17: SIP-lite call control ----------------------------------------------
+
+namespace {
+
+// Shared 3-UE/1-BS in-memory cell for the SIP dialog tests.
+struct SipCell {
+    core::BsNode bs;
+    core::UeNode ue1, ue2, ue3;
+    uint32_t clock = 1000;
+
+    static core::UeNodeConfig cfg(const char* imsi, uint32_t preamble) {
+        core::UeNodeConfig c;
+        c.imsi = imsi;
+        c.rach.preamble_index = static_cast<mac::PreambleIndex>(preamble);
+        return c;
+    }
+
+    SipCell()
+        : ue1(cfg("460011234567890", 42)),
+          ue2(cfg("460011234567891", 43)),
+          ue3(cfg("460011234567892", 44)) {
+        ue1.set_air_send([this](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+        ue2.set_air_send([this](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+        ue3.set_air_send([this](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+        bs.set_air_send([this](const std::vector<uint8_t>& b) {
+            ue1.on_air_bits(b);
+            ue2.on_air_bits(b);
+            ue3.on_air_bits(b);
+        });
+    }
+
+    void pump(uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue1.tick(clock);
+            ue2.tick(clock);
+            ue3.tick(clock);
+            bs.tick(clock);
+        }
+    }
+    bool pump_until(std::function<bool()> pred, uint32_t max_ms) {
+        for (uint32_t e = 0; e < max_ms && !pred(); e += 10) pump(10);
+        return pred();
+    }
+
+    void attach_all() {
+        pump(10);
+        bs.start_broadcast();
+        ue1.set_autoanswer(0);
+        ue2.set_autoanswer(0);
+        ue3.set_autoanswer(0);
+        ue1.attach();
+        pump_until([this] { return ue1.registered(); }, 400);
+        ue2.attach();
+        pump_until([this] { return ue2.registered(); }, 400);
+        ue3.attach();
+        pump_until([this] { return ue3.registered(); }, 400);
+    }
+
+    // Drive a full INVITE->180->200->ACK dialog; ue1 ends up established
+    // with media flowing towards ue2.
+    void establish_ue1_calls_ue2() {
+        ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+        pump_until([this] { return ue2.call_state() == 2; }, 400);
+        ue2.answer();
+        pump_until([this] { return ue1.call_state() == 3 &&
+                                    ue2.call_state() == 3; }, 400);
+    }
+};
+
+} // namespace
+
+TEST(E2eNodes, SipDeclineProducesNoMedia) {
+    // Callee declines (603): caller fails with reason=declined and not a
+    // single media packet is generated on either side.
+    SipCell l;
+    l.attach_all();
+
+    l.ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 2; }, 400));
+    l.ue2.decline();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue1.call_state() == 0; }, 400));
+    EXPECT_EQ(l.ue1.last_call_fail_reason(), "declined");
+    l.pump(1000);
+    EXPECT_EQ(l.ue1.stream_tx_count(), 0u);
+    EXPECT_EQ(l.ue2.stream_rx_count(), 0u);
+    EXPECT_EQ(l.ue2.call_state(), 0);
+}
+
+TEST(E2eNodes, SipBusyWhenCalleeOccupiedByThirdUe) {
+    // ue1<->ue2 established; ue3's INVITE to ue2 gets 486 -> ue3 hears busy,
+    // the original call is undisturbed.
+    SipCell l;
+    l.attach_all();
+    l.establish_ue1_calls_ue2();
+    ASSERT_EQ(l.ue1.call_state(), 3);
+
+    l.ue3.start_call(app::MediaKind::VOICE, "460011234567891");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue3.call_state() == 0; }, 400));
+    EXPECT_EQ(l.ue3.last_call_fail_reason(), "busy");
+    EXPECT_EQ(l.ue1.call_state(), 3); // original dialog untouched
+    EXPECT_EQ(l.ue2.call_state(), 3);
+    EXPECT_EQ(l.ue2.call_peer(), "460011234567890");
+    l.pump(500);
+    EXPECT_EQ(l.ue3.stream_tx_count(), 0u); // busy caller sends no media
+
+    l.ue1.end_call();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 0; }, 400));
+}
+
+TEST(E2eNodes, SipCallerCancelWhileRinging) {
+    // Caller hangs up before the callee answers: CANCEL -> both sides idle,
+    // no failure reason on the caller (local action), no media.
+    SipCell l;
+    l.attach_all();
+
+    l.ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 2; }, 400));
+    l.ue1.end_call(); // CANCEL while ringing
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 0; }, 400));
+    EXPECT_EQ(l.ue1.call_state(), 0);
+    EXPECT_EQ(l.ue1.stream_tx_count(), 0u);
+}
+
+TEST(E2eNodes, SipRingTimeoutFiresWhenCalleeSilent) {
+    // Full no-answer timeout with a shortened ring_timeout_ms: the caller
+    // CANCELS and fails with reason=timeout, the callee goes idle.
+    core::BsNode bs;
+    core::UeNodeConfig c1; c1.imsi = "460011234567890"; c1.ring_timeout_ms = 2000;
+    core::UeNodeConfig c2; c2.imsi = "460011234567891";
+    core::UeNode ue1(c1), ue2(c2);
+    ue1.set_air_send([&](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+    ue2.set_air_send([&](const std::vector<uint8_t>& b) { bs.on_air_bits(b); });
+    bs.set_air_send([&](const std::vector<uint8_t>& b) {
+        ue1.on_air_bits(b);
+        ue2.on_air_bits(b);
+    });
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue1.tick(clock);
+            ue2.tick(clock);
+            bs.tick(clock);
+        }
+    };
+    auto pump_until = [&](auto pred, uint32_t max_ms) {
+        for (uint32_t e = 0; e < max_ms && !pred(); e += 10) pump(10);
+        return pred();
+    };
+    pump(10);
+    bs.start_broadcast();
+    ue2.set_autoanswer(0); // never picks up
+    ue1.attach();
+    ASSERT_TRUE(pump_until([&] { return ue1.registered(); }, 400));
+    ue2.attach();
+    ASSERT_TRUE(pump_until([&] { return ue2.registered(); }, 400));
+
+    ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 2; }, 400));
+    // 2 s ring timeout -> CANCEL -> both sides idle, caller reason=timeout.
+    ASSERT_TRUE(pump_until([&] { return ue1.call_state() == 0; }, 4000));
+    EXPECT_EQ(ue1.last_call_fail_reason(), "timeout");
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 0; }, 1000));
+    EXPECT_EQ(ue1.stream_tx_count(), 0u);
+}
+
+TEST(E2eNodes, SipUnreachableCalleeFailsWithReason) {
+    // INVITE to an IMSI that is not registered: the BS echo-fallback means
+    // no 180 ever comes back -> caller fails with reason=unreachable.
+    SipCell l;
+    l.attach_all();
+
+    l.ue1.start_call(app::MediaKind::VOICE, "460010000000000");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue1.call_state() == 0; }, 8000));
+    EXPECT_EQ(l.ue1.last_call_fail_reason(), "unreachable");
+    EXPECT_EQ(l.ue1.stream_tx_count(), 0u);
+}
+
+TEST(E2eNodes, SipCalleeEstablishesFromMediaWhenAckLost) {
+    // The ACK is control riding the same AM bearer as media: under
+    // congestion an RLC reorder skip can sacrifice it (observed live). The
+    // callee must then derive SIP_CALL_ESTABLISHED from the media itself
+    // (media is ACK-gated on the caller, so it proves establishment).
+    SipCell l;
+    l.attach_all();
+
+    l.ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 2; }, 400));
+
+    // Drop ONLY sig-sized uplink bursts from ue1 (sig SDU ~48 B -> ~1 kbit
+    // bursts; media SDU ~202 B -> ~3.5 kbit bursts). The ACK and all its AM
+    // retransmissions die while media flows; the reorder skip then declares
+    // the ACK's SN lost — exactly the live failure mode.
+    bool drop_small = false;
+    l.ue1.set_air_send([&](const std::vector<uint8_t>& b) {
+        if (drop_small && b.size() < 2000) return;
+        l.bs.on_air_bits(b);
+    });
+    drop_small = true;
+    l.ue2.answer();
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue2.stream_rx_count() > 5 &&
+                      l.ue2.call_established_logged(); },
+        4000));
+    EXPECT_EQ(l.ue2.call_state(), 3);
+    EXPECT_TRUE(l.ue1.call_established_logged()); // via 200 OK (caller side)
+
+    // Hang up still works (BYE) once signalling is let through again.
+    drop_small = false;
+    l.ue1.end_call();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 0; }, 1000));
+}
+
+TEST(E2eNodes, SipDetachMidCallNotifiesPeer) {
+    // Detach while established: the peer sees BYE (best-effort) and tears
+    // its side down.
+    SipCell l;
+    l.attach_all();
+    l.establish_ue1_calls_ue2();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.stream_rx_count() > 0; }, 1000));
+
+    l.ue1.detach();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 0; }, 1000));
+    EXPECT_FALSE(l.ue2.incoming_call_active());
+    l.pump(100);
+    l.ue2.detach();
+    l.ue3.detach();
+    l.pump(40);
+}
+
+TEST(E2eNodes, QosBearerSetPriorityAndMinShare) {
+    // M17: strict priority ctrl > sig > voice > video > best-effort, with
+    // the BE min-share guard kicking in every 4th pick under full load.
+    core::BearerSet bs;
+    auto push = [&](core::Qci q, int n) {
+        for (int i = 0; i < n; ++i) {
+            bs.queue_of(q).push_back(
+                {core::lcid_of(q), false, {static_cast<uint8_t>(q)}});
+        }
+    };
+    push(core::Qci::BEST_EFFORT, 1);
+    push(core::Qci::VIDEO, 1);
+    push(core::Qci::VOICE, 1);
+    push(core::Qci::SIG, 1);
+    bs.ctrl().push_back({mac::LCID_NAS_DCCH, false, {0xCC}});
+
+    // Drain: control first, then strict priority.
+    std::vector<int> order;
+    while (!bs.empty()) order.push_back(bs.pop_next().bytes[0]);
+    ASSERT_EQ(order.size(), 5u);
+    EXPECT_EQ(order[0], 0xCC);                                // ctrl
+    EXPECT_EQ(order[1], static_cast<int>(core::Qci::SIG));    // 5
+    EXPECT_EQ(order[2], static_cast<int>(core::Qci::VOICE));  // 1
+    EXPECT_EQ(order[3], static_cast<int>(core::Qci::VIDEO));  // 2
+    EXPECT_EQ(order[4], static_cast<int>(core::Qci::BEST_EFFORT)); // 9
+
+    // Full load on every class: BE must get at least every 4th pick
+    // (min-share floor), never starve.
+    core::BearerSet bs2;
+    auto push2fn = [&](core::Qci q, int n) {
+        for (int i = 0; i < n; ++i) {
+            bs2.queue_of(q).push_back(
+                {core::lcid_of(q), false, {static_cast<uint8_t>(q)}});
+        }
+    };
+    push2fn(core::Qci::SIG, 4);
+    push2fn(core::Qci::VOICE, 4);
+    push2fn(core::Qci::VIDEO, 4);
+    push2fn(core::Qci::BEST_EFFORT, 4);
+    int be_count = 0;
+    for (int i = 0; i < 16; ++i) {
+        if (bs2.pop_next().bytes[0] ==
+            static_cast<uint8_t>(core::Qci::BEST_EFFORT)) {
+            ++be_count;
+        }
+    }
+    EXPECT_EQ(be_count, 4); // 25% floor: 4 of 16 picks
+}
+
+TEST(E2eNodes, QosBearerSetupAndTeardownEvents) {
+    // M17: a voice call sets up sig+voice bearers on both UEs and on the
+    // BS flow; hangup tears them down on the UEs (the BS keeps its bearers
+    // for the flow's lifetime — documented simplification).
+    SipCell l;
+    l.attach_all();
+
+    EXPECT_FALSE(l.ue1.bearer_established(5));
+    EXPECT_FALSE(l.ue1.bearer_established(1));
+    l.establish_ue1_calls_ue2();
+    // Voice bearers are set up lazily on the first media SDU — wait for it.
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.stream_rx_count() > 0; },
+                             1000));
+    EXPECT_TRUE(l.ue1.bearer_established(5));  // sig
+    EXPECT_TRUE(l.ue1.bearer_established(1));  // voice
+    EXPECT_TRUE(l.ue2.bearer_established(5));
+    EXPECT_TRUE(l.ue2.bearer_established(1));
+    EXPECT_TRUE(l.bs.flow_bearer_established(l.ue1.crnti(), 5));
+    EXPECT_TRUE(l.bs.flow_bearer_established(l.ue1.crnti(), 1));
+    EXPECT_TRUE(l.bs.flow_bearer_established(l.ue2.crnti(), 1));
+    EXPECT_FALSE(l.ue1.bearer_established(2)); // no video bearer
+
+    l.ue1.end_call();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 0; }, 1000));
+    EXPECT_FALSE(l.ue1.bearer_established(5));
+    EXPECT_FALSE(l.ue1.bearer_established(1));
+    EXPECT_FALSE(l.ue2.bearer_established(5));
+    // BS bearers live until the flow is erased (detach below).
+    EXPECT_TRUE(l.bs.flow_bearer_established(l.ue1.crnti(), 1));
+
+    const uint16_t r2 = l.ue2.crnti();
+    l.ue1.detach();
+    l.ue2.detach();
+    l.pump(100);
+    EXPECT_FALSE(l.bs.flow_bearer_established(r2, 1)); // flow erased
+}
+
+TEST(E2eNodes, QosConcurrentVoiceAndVideoCallsDifferentiate) {
+    // M17 demo story: ue1 holds a video call to ue2 AND a voice call to
+    // ue3 at the same time (multi-dialog). Both media flows run on their
+    // own bearers; the best-effort loopback is not starved; kind-specific
+    // hangup ends exactly one dialog.
+    SipCell l;
+    l.attach_all();
+
+    // Video ue1 -> ue2.
+    l.ue1.start_call(app::MediaKind::VIDEO, "460011234567891");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 2; }, 400));
+    l.ue2.answer();
+    // Voice ue1 -> ue3 while the video dialog is active (multi-dialog).
+    l.ue1.start_call(app::MediaKind::VOICE, "460011234567892");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue3.call_state() == 2; }, 400));
+    l.ue3.answer();
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue2.stream_rx_count() > 5 &&
+                      l.ue3.stream_rx_count() > 5; },
+        2000));
+    EXPECT_EQ(l.ue1.call_state(), 3);
+    EXPECT_TRUE(l.ue1.bearer_established(1)); // voice bearer
+    EXPECT_TRUE(l.ue1.bearer_established(2)); // video bearer
+    EXPECT_TRUE(l.ue2.bearer_established(2));
+    EXPECT_TRUE(l.ue3.bearer_established(1));
+    // A second dialog of the SAME kind is refused (one media source/class).
+    l.ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+    EXPECT_EQ(l.ue1.last_call_fail_reason(), "busy");
+    l.pump(1500);
+    EXPECT_GT(l.ue2.stream_rx_count(), 10u); // video keeps flowing
+    EXPECT_GT(l.ue3.stream_rx_count(), 10u); // voice keeps flowing
+
+    // Starvation guard: the best-effort loopback still gets answered while
+    // two media bearers are busy.
+    const uint32_t pong_before = l.ue1.app_rx_count();
+    l.ue1.send_app_data({'P'});
+    ASSERT_TRUE(l.pump_until(
+        [&] { return l.ue1.app_rx_count() > pong_before; }, 1500));
+
+    // Kind-specific hangup: voice ends, video survives; then video ends.
+    l.ue1.end_call(app::MediaKind::VOICE);
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue3.call_state() == 0; }, 1000));
+    EXPECT_EQ(l.ue2.call_state(), 3); // video dialog untouched
+    EXPECT_FALSE(l.ue1.bearer_established(1)); // voice bearer released
+    EXPECT_TRUE(l.ue1.bearer_established(2));
+    l.ue1.end_call(app::MediaKind::VIDEO);
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 0; }, 1000));
+    EXPECT_EQ(l.ue1.call_state(), 0);
+}
+
+TEST(E2eNodes, QosVoiceProtectedWhenVideoSaturatesPipe) {
+    // M17 priority under contention: every air hop is delayed 70 ms, so a
+    // HARQ round costs ~150 ms and the 8-process uplink pipe carries only
+    // ~53 blocks/s. The video flood alone offers ~60 blocks/s (512 B SDU =
+    // 3 UM segments every 50 ms); adding a voice call (~33 blocks/s, one
+    // segment per 30 ms packet) overbooks the pipe ~1.8x. Strict-priority
+    // bearer scheduling must keep voice RTT bounded and lossless while the
+    // video bearer absorbs the congestion (queue-cap shedding, high RTT),
+    // and the best-effort min-share guard must still answer a loopback
+    // ping in the middle of the flood.
+    core::BsNode bs;
+    auto cfg = [](const char* imsi, uint32_t preamble) {
+        core::UeNodeConfig c;
+        c.imsi = imsi;
+        c.rach.preamble_index = static_cast<mac::PreambleIndex>(preamble);
+        return c;
+    };
+    core::UeNode ue1(cfg("460011234567890", 42));
+    core::UeNode ue2(cfg("460011234567891", 43));
+    core::UeNode ue3(cfg("460011234567892", 44));
+
+    constexpr uint32_t kAirDelayMs = 70;
+    uint32_t clock = 1000;
+    std::deque<std::pair<uint32_t, std::vector<uint8_t>>> ul, dl;
+    auto delay_ul = [&](const std::vector<uint8_t>& b) {
+        ul.emplace_back(clock + kAirDelayMs, b);
+    };
+    ue1.set_air_send(delay_ul);
+    ue2.set_air_send(delay_ul);
+    ue3.set_air_send(delay_ul);
+    bs.set_air_send([&](const std::vector<uint8_t>& b) {
+        dl.emplace_back(clock + kAirDelayMs, b);
+    });
+
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            while (!ul.empty() && ul.front().first <= clock) {
+                bs.on_air_bits(ul.front().second);
+                ul.pop_front();
+            }
+            while (!dl.empty() && dl.front().first <= clock) {
+                ue1.on_air_bits(dl.front().second);
+                ue2.on_air_bits(dl.front().second);
+                ue3.on_air_bits(dl.front().second);
+                dl.pop_front();
+            }
+            ue1.tick(clock);
+            ue2.tick(clock);
+            ue3.tick(clock);
+            bs.tick(clock);
+        }
+    };
+    auto pump_until = [&](auto pred, uint32_t max_ms) {
+        for (uint32_t e = 0; e < max_ms && !pred(); e += 10) pump(10);
+        return pred();
+    };
+
+    pump(10);
+    bs.start_broadcast();
+    ue1.set_autoanswer(0);
+    ue2.set_autoanswer(0);
+    ue3.set_autoanswer(0);
+    ue1.attach();
+    ASSERT_TRUE(pump_until([&] { return ue1.registered(); }, 6000));
+    ue2.attach();
+    ASSERT_TRUE(pump_until([&] { return ue2.registered(); }, 6000));
+    ue3.attach();
+    ASSERT_TRUE(pump_until([&] { return ue3.registered(); }, 6000));
+
+    // Video flood ue1 -> ue2 first, then voice ue1 -> ue3 on top of it.
+    ue1.start_call(app::MediaKind::VIDEO, "460011234567891");
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 2; }, 4000));
+    ue2.answer();
+    ASSERT_TRUE(pump_until([&] { return ue2.stream_rx_count() > 5; }, 4000));
+    ue1.start_call(app::MediaKind::VOICE, "460011234567892");
+    ASSERT_TRUE(pump_until([&] { return ue3.call_state() == 2; }, 4000));
+    ue3.answer();
+    ASSERT_TRUE(pump_until([&] { return ue3.stream_rx_count() > 5; }, 4000));
+
+    // Let the flood run: the video queue hits its cap and starts shedding.
+    pump(8000);
+
+    // Voice is protected: keeps flowing, bounded RTT, no loss.
+    EXPECT_GT(ue3.stream_rx_count(app::MediaKind::VOICE), 150u);
+    const int64_t voice_rtt = ue1.stream_rtt_avg_ms(app::MediaKind::VOICE);
+    ASSERT_GE(voice_rtt, 0);
+    EXPECT_LT(voice_rtt, 800);
+    EXPECT_EQ(ue1.stream_loss_count(app::MediaKind::VOICE), 0u);
+    EXPECT_EQ(ue3.stream_loss_count(app::MediaKind::VOICE), 0u);
+
+    // Video absorbs the congestion: markedly worse RTT and real loss.
+    const int64_t video_rtt = ue1.stream_rtt_avg_ms(app::MediaKind::VIDEO);
+    ASSERT_GE(video_rtt, 0);
+    EXPECT_GT(video_rtt, 2 * voice_rtt);
+    EXPECT_GT(ue1.stream_loss_count(app::MediaKind::VIDEO) +
+                  ue2.stream_loss_count(app::MediaKind::VIDEO),
+              0u);
+
+    // Starvation guard: a best-effort loopback ping is still answered.
+    const uint32_t pong_before = ue1.app_rx_count();
+    ue1.send_app_data({'P'});
+    ASSERT_TRUE(pump_until(
+        [&] { return ue1.app_rx_count() > pong_before; }, 3000));
+
+    ue1.end_call(app::MediaKind::VOICE);
+    ue1.end_call(app::MediaKind::VIDEO);
+    ASSERT_TRUE(pump_until([&] { return ue1.call_state() == 0; }, 4000));
+    ue1.detach();
+    ue2.detach();
+    ue3.detach();
+    pump(200);
+}
+
+TEST(E2eNodes, ConfThreePartyBridgeFlow) {
+    // M18 demo story: ue1 hosts a conference with ue2 and ue3. Both ring
+    // and join; the BS bridge fans every participant's voice out to the
+    // other two (each party receives from BOTH others); ue3 leaves and the
+    // remaining two continue; the host's conf-end tears everything down.
+    SipCell l;
+    l.attach_all();
+
+    l.ue1.start_conf("460011234567891", "460011234567892");
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue2.call_state() == 2 && l.ue3.call_state() == 2; },
+        400));
+    l.ue2.answer();
+    l.ue3.answer();
+    const uint32_t conf_id = l.ue1.active_conf_id();
+    ASSERT_NE(conf_id, 0u);
+
+    // Full mesh through the bridge: every party hears BOTH others.
+    ASSERT_TRUE(l.pump_until(
+        [&] {
+            return l.ue1.stream_rx_from("460011234567891") > 3 &&
+                   l.ue1.stream_rx_from("460011234567892") > 3 &&
+                   l.ue2.stream_rx_from("460011234567890") > 3 &&
+                   l.ue2.stream_rx_from("460011234567892") > 3 &&
+                   l.ue3.stream_rx_from("460011234567890") > 3 &&
+                   l.ue3.stream_rx_from("460011234567891") > 3;
+        },
+        2000));
+    EXPECT_EQ(l.bs.conf_member_count(conf_id), 3u);
+
+    // ue3 leaves (participant "call end"): the conference continues.
+    l.ue3.end_call();
+    ASSERT_TRUE(l.pump_until(
+        [&] { return l.bs.conf_member_count(conf_id) == 2; }, 400));
+    EXPECT_EQ(l.ue3.call_state(), 0);
+    const uint32_t rx1 = l.ue1.stream_rx_from("460011234567891");
+    const uint32_t rx2 = l.ue2.stream_rx_from("460011234567890");
+    l.pump(500);
+    EXPECT_GT(l.ue1.stream_rx_from("460011234567891"), rx1);
+    EXPECT_GT(l.ue2.stream_rx_from("460011234567890"), rx2);
+
+    // Host ends the conference: both dialogs BYEd, parties torn down.
+    l.ue1.end_conf();
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue1.call_state() == 0 && l.ue2.call_state() == 0; },
+        1000));
+    EXPECT_EQ(l.ue1.active_conf_id(), 0u);
+    EXPECT_EQ(l.bs.conf_count(), 0u);
+}
+
+TEST(E2eNodes, ConfDeclineKeepsTwoPartyConference) {
+    // M18: one invited party declines — the conference proceeds with the
+    // two remaining parties instead of aborting.
+    SipCell l;
+    l.attach_all();
+
+    l.ue1.start_conf("460011234567891", "460011234567892");
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue2.call_state() == 2 && l.ue3.call_state() == 2; },
+        400));
+    const uint32_t conf_id = l.ue1.active_conf_id();
+    l.ue2.answer();
+    l.ue3.decline();
+
+    ASSERT_TRUE(l.pump_until(
+        [&] {
+            return l.ue1.stream_rx_from("460011234567891") > 3 &&
+                   l.ue2.stream_rx_from("460011234567890") > 3;
+        },
+        2000));
+    EXPECT_EQ(l.bs.conf_member_count(conf_id), 2u);
+    EXPECT_EQ(l.ue3.call_state(), 0);
+    EXPECT_EQ(l.ue3.stream_tx_count(), 0u); // declining party never talks
+
+    l.ue1.end_conf();
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue1.call_state() == 0 && l.ue2.call_state() == 0; },
+        1000));
+    EXPECT_EQ(l.bs.conf_count(), 0u);
+}
+
+TEST(E2eNodes, ConfInviteToBusyUeGets486) {
+    // M18 interop: conference INVITEs to UEs occupied in a 1:1 call get 486
+    // like any call; with every invitation refused the BS closes the empty
+    // conference and the original call is undisturbed.
+    SipCell l;
+    l.attach_all();
+
+    // ue2 <-> ue3 in an established 1:1 voice call.
+    l.ue2.start_call(app::MediaKind::VOICE, "460011234567892");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue3.call_state() == 2; }, 400));
+    l.ue3.answer();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 3; }, 400));
+
+    l.ue1.start_conf("460011234567891", "460011234567892");
+    // Both 486s must come back: ue1's conf dialogs fail "busy"...
+    ASSERT_TRUE(l.pump_until(
+        [&l] {
+            return l.ue1.call_state() == 0 &&
+                   l.ue1.last_call_fail_reason() == "busy";
+        },
+        800));
+    // ...and with every invitation refused the BS closes the conference.
+    ASSERT_TRUE(l.pump_until([&] { return l.bs.conf_count() == 0; }, 400));
+    EXPECT_EQ(l.ue1.stream_tx_count(), 0u); // no conf media ever sent
+    EXPECT_EQ(l.ue2.call_state(), 3);       // original call undisturbed
+    EXPECT_EQ(l.ue3.call_state(), 3);
+
+    l.ue2.end_call();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue3.call_state() == 0; }, 400));
+}
+
+// ---- M20: RRC_INACTIVE + fast resume -----------------------------------------
+
+namespace {
+
+// 2-UE cell with a short inactivity timer for suspend/resume tests.
+// air_delay_ms > 0 routes every hop through a delay queue (used by the
+// resume-vs-attach cost test to turn signalling hop counts into time).
+struct InactiveCell {
+    core::BsNode bs;
+    core::UeNode ue1, ue2;
+    uint32_t clock = 1000;
+    uint32_t air_delay_ms = 0;
+    std::deque<std::pair<uint32_t, std::vector<uint8_t>>> ul_q, dl_q;
+
+    static core::UeNodeConfig uecfg(const char* imsi, uint32_t preamble) {
+        core::UeNodeConfig c;
+        c.imsi = imsi;
+        c.rach.preamble_index = static_cast<mac::PreambleIndex>(preamble);
+        return c;
+    }
+
+    explicit InactiveCell(uint32_t inactive_ms = 2000)
+        : bs([inactive_ms] {
+              core::BsNodeConfig c;
+              c.inactive_ms = inactive_ms;
+              return c;
+          }()),
+          ue1(uecfg("460011234567890", 42)),
+          ue2(uecfg("460011234567891", 43)) {
+        ue1.set_air_send([this](const std::vector<uint8_t>& b) { ul_send(b); });
+        ue2.set_air_send([this](const std::vector<uint8_t>& b) { ul_send(b); });
+        bs.set_air_send([this](const std::vector<uint8_t>& b) { dl_send(b); });
+    }
+
+    void ul_send(const std::vector<uint8_t>& b) {
+        if (air_delay_ms == 0) bs.on_air_bits(b);
+        else ul_q.emplace_back(clock + air_delay_ms, b);
+    }
+    void dl_send(const std::vector<uint8_t>& b) {
+        if (air_delay_ms == 0) {
+            ue1.on_air_bits(b);
+            ue2.on_air_bits(b);
+        } else {
+            dl_q.emplace_back(clock + air_delay_ms, b);
+        }
+    }
+
+    void pump(uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            while (!ul_q.empty() && ul_q.front().first <= clock) {
+                bs.on_air_bits(ul_q.front().second);
+                ul_q.pop_front();
+            }
+            while (!dl_q.empty() && dl_q.front().first <= clock) {
+                ue1.on_air_bits(dl_q.front().second);
+                ue2.on_air_bits(dl_q.front().second);
+                dl_q.pop_front();
+            }
+            ue1.tick(clock);
+            ue2.tick(clock);
+            bs.tick(clock);
+        }
+    }
+    bool pump_until(std::function<bool()> pred, uint32_t max_ms) {
+        for (uint32_t e = 0; e < max_ms && !pred(); e += 10) pump(10);
+        return pred();
+    }
+
+    void attach_both() {
+        pump(10);
+        bs.start_broadcast();
+        ue1.set_autoanswer(0);
+        ue2.set_autoanswer(0);
+        ue1.attach();
+        pump_until([this] { return ue1.registered(); }, 6000);
+        ue2.attach();
+        pump_until([this] { return ue2.registered(); }, 6000);
+    }
+
+    void suspend_ue1(uint32_t bound_ms = 4000) {
+        ASSERT_TRUE(pump_until([this] { return ue1.inactive(); }, bound_ms));
+    }
+};
+
+} // namespace
+
+TEST(E2eNodes, RrcInactiveSuspendResumePreservesSession) {
+    // M20 demo story: screen off (suspend) -> screen on (activity) — the
+    // UE resumes with registration, bearers and keys intact, and media
+    // works right after.
+    InactiveCell l;
+    l.attach_both();
+    const uint16_t r1 = l.ue1.crnti();
+
+    // Inactivity timer suspends ue1; its BS flow parks, RRC state is
+    // INACTIVE on both sides, NAS registration is kept.
+    l.suspend_ue1();
+    EXPECT_EQ(l.ue1.rrc_state(), rrc::UeState::INACTIVE);
+    EXPECT_TRUE(l.bs.flow_suspended(r1));
+    EXPECT_TRUE(l.ue1.registered()); // registration retained
+    const uint16_t r2 = l.ue2.crnti();
+    l.pump(2500); // ue2 also goes inactive (it is idle too)
+
+    // Outbound activity: message queues, resumes, gets delivered.
+    l.ue1.send_msg("460011234567891", "back-online");
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue2.msg_rx_count() > 0; }, 2000));
+    EXPECT_EQ(l.ue2.last_msg_text(), "back-online");
+    EXPECT_EQ(l.ue1.rrc_state(), rrc::UeState::CONNECTED);
+    EXPECT_FALSE(l.bs.flow_suspended(l.ue1.crnti()));
+    EXPECT_TRUE(l.ue1.registered());
+
+    // Voice call right after the resume — bearers/keys were preserved.
+    l.ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 2; },
+                             2000));
+    l.ue2.answer();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.stream_rx_count() > 5; },
+                             2000));
+    l.ue1.end_call();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.call_state() == 0; },
+                             1000));
+    (void)r2;
+}
+
+TEST(E2eNodes, RrcResumeIsCheaperThanAttach) {
+    // M20: the resume shortcut must measurably beat a full attach. The air
+    // is delayed 30 ms/hop so signalling hop counts surface as time:
+    // attach = RACH(4) + RRC setup(3) + NAS attach/auth/accept(~6) hops,
+    // resume = RACH(4) + RESUME_REQUEST/OK(2) hops.
+    InactiveCell l(1500);
+    l.air_delay_ms = 30;
+    l.pump(10);
+    l.bs.start_broadcast();
+    l.ue1.set_autoanswer(0);
+    l.ue2.set_autoanswer(0);
+
+    const uint32_t t_attach0 = l.clock;
+    l.ue1.attach();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue1.registered(); }, 4000));
+    const uint32_t attach_ms = l.clock - t_attach0;
+
+    l.ue2.attach();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue2.registered(); }, 4000));
+    l.suspend_ue1(6000);
+
+    const uint32_t t_wake0 = l.clock;
+    l.ue1.wake();
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue1.rrc_state() == rrc::UeState::CONNECTED; },
+        4000));
+    const uint32_t resume_ms = l.clock - t_wake0;
+
+    EXPECT_LT(resume_ms, attach_ms)
+        << "resume " << resume_ms << " ms vs attach " << attach_ms << " ms";
+}
+
+TEST(E2eNodes, RrcResumeStaleIdFallsBackToFullSetup) {
+    // M20: the network forgot the resume identity (context dropped out of
+    // band) — RESUME_FAILURE and the UE re-attaches cleanly.
+    InactiveCell l;
+    l.attach_both();
+    const uint16_t r1 = l.ue1.crnti();
+    l.suspend_ue1();
+
+    l.bs.rrc().release_context(r1); // context gone on the network side
+    l.ue1.wake();
+    // Registration is RETAINED through the suspend, so "registered" alone
+    // is true immediately — wait for the full fallback to reconnect.
+    ASSERT_TRUE(l.pump_until(
+        [&l] {
+            return l.ue1.registered() &&
+                   l.ue1.rrc_state() == rrc::UeState::CONNECTED;
+        },
+        4000));
+    // Full fallback: the loopback works end to end again.
+    const uint32_t pong_before = l.ue1.app_rx_count();
+    l.ue1.send_app_data({'P'});
+    ASSERT_TRUE(l.pump_until(
+        [&] { return l.ue1.app_rx_count() > pong_before; }, 1500));
+}
+
+TEST(E2eNodes, PagingWakesInactiveUeOnIncomingCall) {
+    // M20: an incoming call to an INACTIVE UE pages it over the broadcast
+    // channel; the UE resumes, the queued INVITE is delivered and the
+    // dialog completes.
+    InactiveCell l;
+    l.attach_both();
+    l.suspend_ue1();
+
+    l.ue2.start_call(app::MediaKind::VOICE, "460011234567890");
+    // BS pages ue1 -> resume -> queued INVITE delivered -> ue1 rings.
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue1.call_state() == 2; },
+                             3000));
+    EXPECT_EQ(l.ue1.rrc_state(), rrc::UeState::CONNECTED);
+    l.ue1.answer();
+    ASSERT_TRUE(l.pump_until(
+        [&l] { return l.ue1.stream_rx_count() > 3; }, 2000));
+    l.ue2.end_call();
+    ASSERT_TRUE(l.pump_until([&l] { return l.ue1.call_state() == 0; },
+                             1000));
+}
+
+TEST(E2eNodes, DetachFromInactiveWorks) {
+    // M20: detach while INACTIVE resumes first, then tears the network
+    // context down cleanly.
+    InactiveCell l;
+    l.attach_both();
+    const uint16_t r1 = l.ue1.crnti();
+    l.suspend_ue1();
+
+    l.ue1.detach();
+    ASSERT_TRUE(l.pump_until([&l] { return !l.ue1.registered(); }, 3000));
+    EXPECT_EQ(l.bs.registered_ue_count(), 1u); // only ue2 remains
+    EXPECT_EQ(l.ue1.rrc_state(), rrc::UeState::IDLE);
+    (void)r1;
+}
+
+TEST(E2eNodes, LinkAdaptationFollowsChannelQuality) {
+    // M19: the UE derives CQI from the DMRS SNR of decoded DL bursts and
+    // reports it via MAC CE; the BS re-selects the downlink MCS per flow
+    // (16qam >= cqi 14 | qpsk below — measured decode curve). Metrics are
+    // injected at the radio edge here; live they come from phy_rx_frame.
+    SipCell l;
+    float snr_ue1 = 28.f; // good link
+    l.bs.set_air_send([&](const std::vector<uint8_t>& b) {
+        l.ue1.on_air_bits_with_metrics(b, snr_ue1, -18.f);
+        l.ue2.on_air_bits(b);
+        l.ue3.on_air_bits(b);
+    });
+    l.attach_all();
+    const uint16_t r1 = l.ue1.crnti();
+    EXPECT_EQ(l.bs.dl_mcs(r1), 0); // no CQI yet: robust QPSK
+
+    ASSERT_TRUE(l.pump_until([&] { return l.bs.dl_mcs(r1) == 1; }, 5000));
+    EXPECT_EQ(l.bs.flow_cqi(r1), 15); // snr 28 -> cqi 15 -> 16QAM
+
+    snr_ue1 = 21.f; // mid link -> QPSK (16QAM needs ~26 dB measured)
+    ASSERT_TRUE(l.pump_until([&] { return l.bs.dl_mcs(r1) == 0; }, 8000));
+
+    snr_ue1 = 27.f; // back over the 16QAM floor (cqi >= 14)
+    ASSERT_TRUE(l.pump_until([&] { return l.bs.dl_mcs(r1) == 1; }, 8000));
+
+    l.ue1.detach();
+    l.ue2.detach();
+    l.ue3.detach();
+    l.pump(200);
+}
+
+TEST(E2eNodes, TpcSteersUeTxPowerTowardsTargetSnr) {
+    // M19: the BS measures UL arrival SNR per flow and orders +/-1 dB TPC;
+    // the UE folds it into its TX power (open-loop pathloss base + TPC
+    // accumulator). Weak UL -> power rises; strong UL -> power falls.
+    SipCell l;
+    float ul_snr = 5.f; // arrives far below the 15 dB target
+    l.ue1.set_air_send([&](const std::vector<uint8_t>& b) {
+        l.bs.on_air_bits_with_metrics(b, ul_snr, -18.f);
+    });
+    l.bs.set_air_send([&](const std::vector<uint8_t>& b) {
+        l.ue1.on_air_bits_with_metrics(b, 20.f, -18.f);
+        l.ue2.on_air_bits(b);
+        l.ue3.on_air_bits(b);
+    });
+    l.attach_all();
+    l.ue1.start_traffic(); // steady UL reference bursts
+
+    // The closed loop climbs from wherever the open loop landed (the TPC
+    // accumulator is already trimming by the first service tick).
+    l.pump(1500);
+    const double start = l.ue1.tx_power_db();
+    l.pump(6000); // TPC +1 dB every 500 ms while SNR < target-2
+    const double raised = l.ue1.tx_power_db();
+    EXPECT_GT(raised, start + 3.0);
+    EXPECT_GT(raised, 2.0); // weak UL pushed power well up
+
+    ul_snr = 27.f; // now arriving too strong (target 23 dB)
+    l.pump(6000);
+    EXPECT_LT(l.ue1.tx_power_db(), raised - 2.0);
+
+    l.ue1.detach();
+    l.ue2.detach();
+    l.ue3.detach();
+    l.pump(200);
+}
+
+// ---- M21: 5G-AKA-style authentication ----------------------------------------
+
+namespace {
+
+// Direct NasUe <-> NasBs pair (no RRC/RACH): drives the AKA exchange
+// synchronously through the send callbacks, with a pinned RAND source so
+// "freshness" is deterministic.
+struct AkaPair {
+    static constexpr const char* kImsi = "460019999999999";
+    nas::NasBs bs;
+    nas::NasUe ue;
+    std::array<uint8_t, crypto::kKey256Size> key;
+
+    AkaPair() {
+        key.fill(0xA5);
+        bs.add_subscriber(kImsi, key);
+        ue.set_usim_key(key);
+        bs.set_send_callback(
+            [this](uint32_t, const std::vector<uint8_t>& p) {
+                ue.on_message(p);
+            });
+        ue.set_send_callback([this](const std::vector<uint8_t>& p) {
+            bs.handle_message(0, p);
+        });
+        bs.set_rand_fn([n = 1]() mutable {
+            std::array<uint8_t, nas::aka::kRandLen> r{};
+            r[nas::aka::kRandLen - 1] = static_cast<uint8_t>(n++);
+            return r;
+        });
+    }
+
+    void attach() { ue.send_attach_request(kImsi); }
+};
+
+} // namespace
+
+TEST(E2eNodes, AkaHappyPathFreshKeysPerAttach) {
+    // M21: full AKA (RAND/AUTN -> RES -> success), KASME agreed on both
+    // ends, and a re-attach derives DIFFERENT session keys (fresh RAND).
+    AkaPair l;
+    l.attach();
+    ASSERT_EQ(l.ue.state(), nas::UeState::REGISTERED);
+    ASSERT_TRUE(l.ue.authenticated());
+    const uint32_t tmsi = l.ue.assigned_tmsi();
+    ASSERT_NE(l.bs.session_key(tmsi), nullptr);
+    const auto k1 = l.ue.session_key();
+    EXPECT_EQ(k1, *l.bs.session_key(tmsi)); // KASME from CK||IK, both sides
+    EXPECT_EQ(l.ue.usim_sqn(), 1u);
+
+    l.ue.send_detach();
+    l.attach();
+    ASSERT_EQ(l.ue.state(), nas::UeState::REGISTERED);
+    EXPECT_NE(l.ue.session_key(), k1); // fresh RAND -> fresh keys
+    EXPECT_EQ(l.ue.usim_sqn(), 2u);
+    EXPECT_EQ(l.bs.subscriber_sqn(AkaPair::kImsi), 2u);
+}
+
+TEST(E2eNodes, AkaMacFailureRejectsNetwork) {
+    // M21: a network that cannot prove knowledge of K (wrong key on the
+    // USIM side) fails the AUTN MAC check — the UE sends AUTH_FAILURE
+    // (cause MAC failure) and never registers.
+    AkaPair l;
+    std::array<uint8_t, crypto::kKey256Size> bad;
+    bad.fill(0x5E);
+    l.ue.set_usim_key(bad);
+    l.attach();
+    EXPECT_NE(l.ue.state(), nas::UeState::REGISTERED);
+    EXPECT_FALSE(l.ue.authenticated());
+    EXPECT_EQ(l.ue.usim_sqn(), 0u); // no SQN was ever accepted
+    ASSERT_EQ(l.bs.session_key(l.ue.assigned_tmsi()), nullptr);
+}
+
+TEST(E2eNodes, AkaStaleSqnTriggersAutsResync) {
+    // M21: the network's SQN falls behind the USIM's (context reset out of
+    // band) -> the UE answers with a synchronisation failure + AUTS, the
+    // network resynchronises from it and the retry succeeds.
+    AkaPair l;
+    l.attach();
+    ASSERT_EQ(l.ue.state(), nas::UeState::REGISTERED);
+    l.ue.send_detach();
+
+    l.bs.set_subscriber_sqn(AkaPair::kImsi, 0); // network went back in time
+    l.attach(); // challenge SQN=1 <= USIM's 1 -> AUTS -> retry with SQN=2
+    ASSERT_EQ(l.ue.state(), nas::UeState::REGISTERED);
+    EXPECT_TRUE(l.ue.authenticated());
+    EXPECT_EQ(l.ue.usim_sqn(), 2u);
+    EXPECT_EQ(l.bs.subscriber_sqn(AkaPair::kImsi), 2u); // resynchronised
+    EXPECT_EQ(l.ue.session_key(), *l.bs.session_key(l.ue.assigned_tmsi()));
+}
+
+TEST(E2eNodes, AkaResMismatchRejects) {
+    // M21: a RES that does not match XRES (tampered in flight here) gets
+    // the attach rejected — no registration, no session key.
+    AkaPair l;
+    l.ue.set_send_callback([&l](const std::vector<uint8_t>& p) {
+        auto msg = nas::NasMessage::decode(p);
+        if (msg.msg_type == nas::NasMessageType::AUTH_RESPONSE &&
+            !msg.value.empty()) {
+            msg.value[0] ^= 0xFF; // tamper with the response
+            l.bs.handle_message(0, msg.encode());
+            return;
+        }
+        l.bs.handle_message(0, p);
+    });
+    l.attach();
+    EXPECT_NE(l.ue.state(), nas::UeState::REGISTERED);
+    EXPECT_FALSE(l.ue.authenticated());
+    ASSERT_EQ(l.bs.session_key(l.ue.assigned_tmsi()), nullptr);
+}
+
+TEST(E2eNodes, AkaDerivedKeyDrivesPdcpBothWays) {
+    // M21: the KASME agreed during AKA is exactly what PDCP uses — a frame
+    // protected with one side's key must unprotect with the other's, in
+    // both directions (and fail with a foreign key).
+    AkaPair l;
+    l.attach();
+    ASSERT_EQ(l.ue.state(), nas::UeState::REGISTERED);
+    const auto ue_key = l.ue.session_key();
+    const auto bs_key = *l.bs.session_key(l.ue.assigned_tmsi());
+
+    const std::vector<uint8_t> sdu = {'s', 'e', 'c', 'r', 'e', 't'};
+    std::vector<uint8_t> out;
+    EXPECT_TRUE(pdcp::unprotect(bs_key, pdcp::protect(ue_key, 7, sdu), out));
+    EXPECT_EQ(out, sdu); // UE -> BS direction
+    out.clear();
+    EXPECT_TRUE(pdcp::unprotect(ue_key, pdcp::protect(bs_key, 9, sdu), out));
+    EXPECT_EQ(out, sdu); // BS -> UE direction
+    std::array<uint8_t, crypto::kKey256Size> foreign{};
+    foreign.fill(0x11);
+    EXPECT_FALSE(pdcp::unprotect(foreign, pdcp::protect(ue_key, 1, sdu), out));
+}
+
 TEST(E2eNodes, AuthenticatedAttachWithEncryptedUserPlane) {
-    // M12: provision a subscriber (USIM key on the UE, same key in the HSS).
-    // Attach must include the AUTH challenge/response exchange, and the
-    // user plane must flow with PDCP confidentiality enabled.
+    // M12/M21: provision a subscriber (USIM key on the UE, same key in the
+    // HSS). Attach must include the AKA exchange (RAND/AUTN -> RES), and
+    // the user plane must flow with PDCP confidentiality keyed by the
+    // derived KASME.
     core::BsNode bs;
     core::UeNodeConfig ue_cfg;
     ue_cfg.imsi = "460019999999999";
@@ -397,7 +1582,10 @@ TEST(E2eNodes, AuthenticatedAttachWithEncryptedUserPlane) {
 
 TEST(E2eNodes, WrongUsimKeyIsRejected) {
     // A UE presenting a key that does not match the HSS entry must fail
-    // authentication and never reach REGISTERED.
+    // authentication and never reach REGISTERED. M21: with the AKA
+    // exchange this now fails on the UE's AUTN MAC check (AUTH_FAILURE
+    // cause "mac") instead of the old RES mismatch.
+
     core::BsNode bs;
     core::UeNodeConfig ue_cfg;
     ue_cfg.imsi = "460018888888888";
@@ -444,6 +1632,8 @@ core::BsNode make_cell(uint16_t cell_id, uint16_t pci) {
     core::BsNodeConfig c;
     c.cell_id = cell_id;
     c.pci = pci;
+    // M22: cell-scoped C-RNTI space (cell 2 starts at 16385 = 0x4001).
+    c.crnti_base = cell_id == 1 ? 0x0001 : 0x4001;
     return core::BsNode(c);
 }
 
@@ -609,6 +1799,170 @@ TEST(E2eNodes, AmfArbitratedHandoverBetweenCells) {
     // just verify the RRC/registration state).
     EXPECT_TRUE(ue.registered());
     EXPECT_EQ(ue.nas().assigned_tmsi(), tmsi_before);
+}
+
+TEST(E2eNodes, CellTargetedAttachStaysOnSelectedCell) {
+    // M22: with both cells audible the UE camps on the strongest and its
+    // RACH/SetupRequest is answered ONLY by that cell — the foreign cell
+    // must hold no context for the UE (preamble partitioning + setup gate).
+    core::BsNode bs_a(make_cell(1, 0)), bs_b(make_cell(2, 1));
+    core::UeNodeConfig uc;
+    uc.imsi = "460011234567890";
+    uc.rach.preamble_index = 42;
+    core::UeNode ue(uc);
+    ue.set_air_send([&](const std::vector<uint8_t>& b) {
+        bs_a.on_air_bits(b);
+        bs_b.on_air_bits(b);
+    });
+    bs_a.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+    bs_b.set_air_send([&](const std::vector<uint8_t>& b) { ue.on_air_bits(b); });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue.tick(clock);
+            bs_a.tick(clock);
+            bs_b.tick(clock);
+        }
+    };
+    auto pump_until = [&](auto pred, uint32_t max_ms) {
+        for (uint32_t e = 0; e < max_ms && !pred(); e += 10) pump(10);
+        return pred();
+    };
+    pump(10);
+    bs_a.start_broadcast();
+    pump(300); // cell 1 clearly stronger before cell 2 appears
+    bs_b.start_broadcast();
+    pump(300);
+    ue.attach();
+    ASSERT_TRUE(pump_until([&] { return ue.registered(); }, 800));
+    EXPECT_EQ(ue.serving_cell(), 1u);
+    EXPECT_TRUE(bs_a.ue_connected(ue.crnti()));
+    // The foreign cell never answered: no RRC context for this UE at all.
+    EXPECT_EQ(bs_b.rrc().find_ue(ue.crnti()), nullptr);
+    ue.detach();
+    pump(100);
+}
+
+TEST(E2eNodes, XnHandoverMovesUeAndKeepsUserPlane) {
+    // M22 capstone path in-process: two gNBs linked over Xn (in-memory
+    // carrier; the live demo uses UdpCnLink). ue1 camps on cell 1 with an
+    // active voice call to ue2; cell 1 then vanishes FOR UE1 ONLY
+    // (broadcasts filtered out, unicast sneaks through — the deterministic
+    // equivalent of the channel sim's "bad" profile). Measurement reports
+    // drive an Xn handover; registration, keys and the call survive, and
+    // U2U traffic crosses cells over Xn forwarding.
+    cn::InMemoryCnLink xn_a, xn_b;
+    xn_a.connect_to(&xn_b);
+    core::BsNode bs_a(make_cell(1, 0)), bs_b(make_cell(2, 1));
+    bs_a.attach_xn(&xn_a, 2);
+    bs_b.attach_xn(&xn_b, 1);
+
+    auto uecfg = [](const char* imsi, uint32_t preamble) {
+        core::UeNodeConfig c;
+        c.imsi = imsi;
+        c.rach.preamble_index = static_cast<mac::PreambleIndex>(preamble);
+        return c;
+    };
+    core::UeNode ue1(uecfg("460011234567890", 42));
+    core::UeNode ue2(uecfg("460011234567891", 43));
+    bool dark_for_ue1 = false;
+    ue1.set_air_send([&](const std::vector<uint8_t>& b) {
+        bs_a.on_air_bits(b);
+        bs_b.on_air_bits(b);
+    });
+    ue2.set_air_send([&](const std::vector<uint8_t>& b) {
+        bs_a.on_air_bits(b);
+        bs_b.on_air_bits(b);
+    });
+    bs_a.set_air_send([&](const std::vector<uint8_t>& b) {
+        if (dark_for_ue1) {
+            // Cell 1 vanished for ue1: broadcasts die, unicast gets
+            // through (mirrors the channel sim's per-(UE,cell) "bad").
+            std::vector<uint8_t> bytes;
+            core::AirFrame f;
+            if (core::unpack_air_bits(b, bytes) &&
+                core::decode_frame(bytes.data(), bytes.size(), f) &&
+                f.rnti == mac::RNTI_BROADCAST) {
+                // dropped for ue1
+            } else {
+                ue1.on_air_bits(b);
+            }
+        } else {
+            ue1.on_air_bits(b);
+        }
+        ue2.on_air_bits(b);
+    });
+    bs_b.set_air_send([&](const std::vector<uint8_t>& b) {
+        ue1.on_air_bits(b);
+        ue2.on_air_bits(b);
+    });
+
+    uint32_t clock = 1000;
+    auto pump = [&](uint32_t ms) {
+        for (uint32_t e = 0; e < ms; e += 10) {
+            clock += 10;
+            ue1.tick(clock);
+            ue2.tick(clock);
+            bs_a.tick(clock);
+            bs_b.tick(clock);
+        }
+    };
+    auto pump_until = [&](auto pred, uint32_t max_ms) {
+        for (uint32_t e = 0; e < max_ms && !pred(); e += 10) pump(10);
+        return pred();
+    };
+
+    pump(10);
+    bs_a.start_broadcast();
+    ue1.set_autoanswer(0);
+    ue2.set_autoanswer(0);
+    ue1.attach();
+    ASSERT_TRUE(pump_until([&] { return ue1.registered(); }, 600));
+    ue2.attach();
+    ASSERT_TRUE(pump_until([&] { return ue2.registered(); }, 600));
+    bs_b.start_broadcast();
+    pump(300); // both cells audible; serving stays cell 1
+    ASSERT_EQ(ue1.serving_cell(), 1u);
+
+    // Voice call ue1 -> ue2 on cell 1.
+    ue1.start_call(app::MediaKind::VOICE, "460011234567891");
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 2; }, 400));
+    ue2.answer();
+    ASSERT_TRUE(pump_until([&] { return ue2.stream_rx_count() > 3; }, 1000));
+
+    // Cell 1 goes dark for ue1: meas reports lack the serving cell ->
+    // bs_a hands ue1 over to cell 2 over Xn.
+    const uint16_t old_crnti = ue1.crnti();
+    const uint32_t rx_before = ue2.stream_rx_count();
+    dark_for_ue1 = true;
+    ASSERT_TRUE(pump_until(
+        [&] {
+            return ue1.serving_cell() == 2u &&
+                   ue1.rrc_state() == rrc::UeState::CONNECTED;
+        },
+        4000));
+    EXPECT_NE(ue1.crnti(), old_crnti);
+    EXPECT_TRUE(bs_b.ue_connected(ue1.crnti()));
+    EXPECT_TRUE(ue1.registered()); // registration carried over
+
+    // The call survives: media keeps flowing into ue2 (ue1 UL -> bs_b ->
+    // Xn -> bs_a -> ue2).
+    ASSERT_TRUE(pump_until(
+        [&] { return ue2.stream_rx_count() > rx_before + 5; }, 3000));
+
+    // Cross-cell U2U after the move: ue2 (cell 1) texts ue1 (cell 2) —
+    // bs_a forwards over Xn to bs_b.
+    ue2.send_msg("460011234567890", "across-cells");
+    ASSERT_TRUE(pump_until([&] { return ue1.msg_rx_count() > 0; }, 2000));
+    EXPECT_EQ(ue1.last_msg_text(), "across-cells");
+
+    ue1.end_call();
+    ASSERT_TRUE(pump_until([&] { return ue2.call_state() == 0; }, 2000));
+    ue1.detach();
+    ue2.detach();
+    pump(200);
 }
 
 TEST(E2eNodes, PagingTriggersIdleUeServiceRequest) {

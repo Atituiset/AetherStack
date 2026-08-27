@@ -12,8 +12,9 @@ enum class NasMessageType : uint8_t {
     ATTACH_ACCEPT = 2,
     ATTACH_REJECT = 3,
     DETACH = 4,
-    AUTH_REQUEST = 5,   // value: RAND (32B challenge)
-    AUTH_RESPONSE = 6,  // value: RES (32B HMAC-SHA256(K, RAND))
+    AUTH_REQUEST = 5,   // M21: value = [RAND:16][AUTN:16]
+    AUTH_RESPONSE = 6,  // M21: value = [RES:16]
+    AUTH_FAILURE = 7,   // M21: value = [cause:1][imsi_len:1][imsi][AUTS:14?]
 };
 
 struct NasMessage {

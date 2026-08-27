@@ -8,7 +8,15 @@ void RachBs::set_state_callback(RachStateCallback cb) { state_cb_ = std::move(cb
 void RachBs::set_ccch_handler(CcchHandler handler) { ccch_handler_ = std::move(handler); }
 
 void RachBs::on_prach_received(PreambleIndex preamble_idx) {
-    RaRnti ra_rnti = 0x4300 | preamble_idx;
+    // M22: preamble partitioning — another cell's random access is not
+    // ours to answer (shared medium, both cells hear every MSG1).
+    if (cell_for_preamble(preamble_idx) != cell_id_) {
+        LOG_DEBUG(ev::RACH_PREAMBLE_FOREIGN_CELL,
+                  {{"preamble", std::to_string(preamble_idx)},
+                   {"cell", std::to_string(cell_id_)}});
+        return;
+    }
+    RaRnti ra_rnti = ra_rnti_for_preamble(preamble_idx);
     uint16_t ta = 12;
     uint8_t ul_grant = 5;
 
@@ -38,13 +46,16 @@ void RachBs::on_msg3_received(RaRnti ra_rnti, const std::vector<uint8_t>& msg3_d
         return;
     }
 
-    uint16_t crnti = next_crnti_++;
+    uint16_t crnti = next_crnti_++; // base set via set_crnti_base (M22)
     it->second.c_rnti = crnti;
 
-    // Send MSG4: Contention Resolution
+    // Send MSG4: Contention Resolution. The RA-RNTI rides along so a UE on
+    // the shared medium claims only its own C-RNTI.
     std::vector<uint8_t> msg4 = {static_cast<uint8_t>(RachMsgType::MSG4_CONTENTION_RESOLVE),
                                   static_cast<uint8_t>(crnti & 0xFF),
-                                  static_cast<uint8_t>((crnti >> 8) & 0xFF)};
+                                  static_cast<uint8_t>((crnti >> 8) & 0xFF),
+                                  static_cast<uint8_t>(ra_rnti & 0xFF),
+                                  static_cast<uint8_t>((ra_rnti >> 8) & 0xFF)};
     if (send_cb_) send_cb_(RachMsgType::MSG4_CONTENTION_RESOLVE, msg4);
     LOG_INFO(ev::MAC_RACH_MSG4, {{"ra_rnti", std::to_string(ra_rnti)},
                                 {"c_rnti", std::to_string(crnti)}});

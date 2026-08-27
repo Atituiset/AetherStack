@@ -24,9 +24,19 @@ namespace mac {
 constexpr uint8_t LCID_CCCH = 0;
 constexpr uint8_t LCID_NAS_DCCH = 1;
 constexpr uint8_t LCID_APP_DTCH = 2;
+// M17: QoS dedicated bearers — one logical channel per service class.
+constexpr uint8_t LCID_APP_SIG = 3;   // QCI5  SIP-lite call control (AM)
+constexpr uint8_t LCID_APP_VOICE = 4; // QCI1  conversational voice (AM)
+constexpr uint8_t LCID_APP_VIDEO = 5; // QCI2  conversational video (AM)
 constexpr uint8_t LCID_HARQ_ACK = 60; // 0x3C control: [proc][ack]
-constexpr uint8_t LCID_RLC_STATUS = 59; // 0x3B control: RLC AM STATUS PDU
+constexpr uint8_t LCID_RLC_STATUS = 59; // 0x3B control: RLC AM STATUS PDU (default bearer)
 constexpr uint8_t LCID_PAGING = 58; // 0x3A control: paging record (IMSI)
+// M17: per-bearer AM STATUS LCIDs (default bearer keeps LCID_RLC_STATUS;
+// voice/video run UM and have no STATUS).
+constexpr uint8_t LCID_RLC_STATUS_SIG = 57;   // 0x39
+// M19: link-adaptation / power-control MAC CEs (single-byte payloads).
+constexpr uint8_t LCID_CQI_REPORT = 56;       // 0x38 UL: [cqi:1]
+constexpr uint8_t LCID_TPC = 55;              // 0x37 DL: [cmd:1 signed dB]
 constexpr uint8_t LCID_SIB1 = 61; // 0x3D
 constexpr uint8_t LCID_MIB = 62;  // 0x3E
 constexpr uint8_t LCID_PADDING = 63; // 0x3F

@@ -13,6 +13,24 @@ using PreambleIndex = uint8_t;
 // RA-RNTI (Random Access Radio Network Temporary Identifier)
 using RaRnti = uint16_t;
 
+// M22: multi-cell preamble partitioning — on the shared medium both cells
+// hear every MSG1, so a UE targets ONE cell by drawing its preamble from
+// that cell's half of the space (cell 1: 0-31, cell 2: 32-63). The BS
+// answers only preambles addressed to its own cell id.
+inline PreambleIndex preamble_for_cell(PreambleIndex base, uint16_t cell_id) {
+    const uint8_t half = cell_id >= 2 ? 1 : 0; // two-cell deployment
+    return static_cast<PreambleIndex>(half * 32 + (base & 0x1F));
+}
+inline uint16_t cell_for_preamble(PreambleIndex p) {
+    return static_cast<uint16_t>((p >> 5) + 1);
+}
+
+// RA-RNTI derivation shared by BS (RAR/MSG4 addressing) and UE (matching
+// only its own RAR/MSG4 on the shared medium).
+inline RaRnti ra_rnti_for_preamble(PreambleIndex p) {
+    return static_cast<RaRnti>(0x4300 | p);
+}
+
 // RACH message types
 enum class RachMsgType : uint8_t {
     MSG1_PRACH = 1,
@@ -39,7 +57,9 @@ const char* rach_state_str(RachState s);
 
 // RACH configuration
 struct RachConfig {
-    PreambleIndex preamble_index = 42;
+    // M22: default lives in cell 1's half of the partitioned preamble
+    // space (0-31); production UEs override per cell via preamble_for_cell.
+    PreambleIndex preamble_index = 10;
     uint16_t rar_window_ms = 10;
     uint16_t content_resolve_window_ms = 20;
     uint8_t max_preamble_transmissions = 3;

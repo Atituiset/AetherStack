@@ -90,7 +90,45 @@ TEST(Frame, CleanRoundTripPreservesBitsAndPci) {
             printf("\n");
         }
     }
-    EXPECT_EQ(rx, bits);
+    // M19: MCS-tagged bursts pad the tail symbol(s) with zeros, so rx may
+    // be longer than the input — compare the payload prefix + zero tail
+    // instead of exact vector equality.
+    ASSERT_GE(rx.size(), bits.size());
+    EXPECT_TRUE(std::equal(bits.begin(), bits.end(), rx.begin()));
+    EXPECT_TRUE(std::all_of(rx.begin() + bits.size(), rx.end(),
+                            [](uint8_t b) { return b == 0; }));
+}
+
+TEST(Frame, McsRoundTripAllRates) {
+    // M19: the MCS ladder — QPSK / 16QAM / 64QAM bursts must all round-trip
+    // cleanly, carrying the same payload in fewer OFDM symbols at higher
+    // rates (that is the whole point of link adaptation).
+    const int n_fft = 64, cp = 16;
+    FrameTxConfig cfg{ n_fft, cp, make_pci(1, 0) };
+    std::mt19937 rng(19);
+    for (phy::Mcs mcs : {phy::Mcs::QPSK, phy::Mcs::QAM16, phy::Mcs::QAM64}) {
+        std::vector<uint8_t> bits(630 * 8); // near-max legacy QPSK payload
+        for (auto& b : bits) b = rng() & 1;
+        auto tx = phy_tx_frame(bits, cfg, mcs);
+        FrameRxResult res;
+        auto rx = phy_rx_frame(tx, cfg, res);
+        ASSERT_TRUE(res.synced) << static_cast<int>(mcs);
+        ASSERT_TRUE(res.pci_confirmed) << static_cast<int>(mcs);
+        EXPECT_EQ(res.mcs, mcs);
+        // Zero padding fills the tail symbol(s); compare the payload prefix
+        // and require the rest to be zeros.
+        ASSERT_GE(rx.size(), bits.size()) << static_cast<int>(mcs);
+        EXPECT_TRUE(std::equal(bits.begin(), bits.end(), rx.begin()))
+            << static_cast<int>(mcs);
+        EXPECT_TRUE(std::all_of(rx.begin() + bits.size(), rx.end(),
+                                [](uint8_t b) { return b == 0; }))
+            << static_cast<int>(mcs);
+        // Higher rate = shorter burst.
+        const int syms = frame_data_symbols(bits.size(), n_fft, mcs);
+        const int qpsk_syms =
+            frame_data_symbols(bits.size(), n_fft, phy::Mcs::QPSK);
+        if (mcs == phy::Mcs::QAM64) EXPECT_LT(syms, qpsk_syms / 2);
+    }
 }
 
 TEST(Frame, ChannelEstimateEqualisesMultipathTaps) {

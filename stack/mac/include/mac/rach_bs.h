@@ -21,6 +21,13 @@ public:
     void set_state_callback(RachStateCallback cb);
     void set_ccch_handler(CcchHandler handler);
 
+    // M22: this cell's identity — MSG1 preambles addressed to another
+    // cell (preamble partitioning) are ignored.
+    void set_cell_id(uint16_t cell_id) { cell_id_ = cell_id; }
+    // M22: C-RNTI allocation base (cells must not collide on the shared
+    // medium). Also seeds the RRC layer's range via BsNode.
+    void set_crnti_base(uint16_t base) { next_crnti_ = base; }
+
     // Handle received MSG1 (PRACH preamble from UE)
     void on_prach_received(PreambleIndex preamble_idx);
 
@@ -42,6 +49,7 @@ private:
     RachStateCallback state_cb_;
     CcchHandler ccch_handler_;
     std::unordered_map<RaRnti, UeContext> ue_contexts_;
+    uint16_t cell_id_ = 1;      // M22
     uint16_t next_crnti_ = 0x0001;
 };
 

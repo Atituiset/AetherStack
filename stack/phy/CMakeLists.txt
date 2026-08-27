@@ -1,5 +1,6 @@
 add_library(phy STATIC
     src/qpsk.cpp
+    src/qam.cpp
     src/ofdm.cpp
     src/phy_io.cpp
     src/fec.cpp

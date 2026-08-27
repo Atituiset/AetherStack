@@ -24,6 +24,13 @@ bool UdpTransport::bind(const std::string& local_addr, uint16_t local_port) {
     } else {
         inet_pton(AF_INET, local_addr.c_str(), &addr.sin_addr);
     }
+    // M16.1: media-rate bursts are ~20 KB each; the default ~200 KB kernel
+    // receive buffer holds only ~10 of them, so a brief processing stall
+    // silently kernel-drops datagrams far above the intended channel loss
+    // rate and tips HARQ into a retransmission storm. Size the buffer for
+    // a real backlog (the kernel doubles and caps at rmem_max).
+    int rcvbuf = 4 * 1024 * 1024;
+    setsockopt(sock_fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     return ::bind(sock_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0;
 }
 

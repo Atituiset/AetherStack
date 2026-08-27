@@ -51,7 +51,12 @@ struct SyncResult {
 
 // Slide-correlate `samples` against all PSS roots. Returns the best timing
 // offset and NID2 (PCI completed by the caller via SSS/DMRS verification).
-SyncResult pss_detect(const std::vector<cfloat>& samples, int n_fft, int cp_len);
+// scan_limit caps the search window (samples from the buffer start); the
+// default scans everything. Bounding it matters: the correlation is
+// O(window × n_fft × roots) per received burst, which dominates the
+// receiver CPU on large media frames.
+SyncResult pss_detect(const std::vector<cfloat>& samples, int n_fft, int cp_len,
+                      size_t scan_limit = static_cast<size_t>(-1));
 
 // Estimate the carrier-frequency offset from the cyclic prefix of one
 // symbol located at `sym_start` (post-CP sample index). Returns radians per

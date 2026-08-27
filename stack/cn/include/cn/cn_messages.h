@@ -47,6 +47,13 @@ enum class MsgType : uint8_t {
     UL_DATA = 32,
     DL_DATA = 33,
     PATH_SWITCH = 34,
+    // M22: Xn interface between two gNBs (dual-BS mobility).
+    XN_HO_PREPARE = 40,     // source -> target {tmsi:4}{from:2}{to:2}{sec:1}{key:32}{imsi_len:1}{imsi}
+    XN_HO_PREPARE_ACK = 41, // target -> source {tmsi:4}{new_rnti:2}
+    XN_FWD_DATA = 42,       // either direction: U2U SDU for a UE that
+                            // moved to the peer {imsi_len:1}{imsi}{sdu}
+    XN_HO_COMPLETE = 43,    // target -> source {tmsi:4}{new_rnti:2}:
+                            // the UE confirmed; release the source context
 };
 
 struct CnMessage {

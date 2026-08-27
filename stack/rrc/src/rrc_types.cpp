@@ -7,6 +7,7 @@ const char* ue_state_str(UeState s) {
         case UeState::IDLE: return "IDLE";
         case UeState::CONNECTING: return "CONNECTING";
         case UeState::CONNECTED: return "CONNECTED";
+        case UeState::INACTIVE: return "INACTIVE";
     }
     return "UNKNOWN";
 }

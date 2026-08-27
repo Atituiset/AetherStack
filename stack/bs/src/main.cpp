@@ -17,6 +17,25 @@
 
 namespace {
 
+// Parse up-to-32-byte hex key material ("a1b2..."; short input zero-pads).
+std::array<uint8_t, crypto::kKey256Size> parse_key(const std::string& hex) {
+    std::array<uint8_t, crypto::kKey256Size> k{};
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return 0;
+    };
+    for (size_t i = 0; i + 1 < hex.size() && i / 2 < k.size(); i += 2) {
+        k[i / 2] = static_cast<uint8_t>((nib(hex[i]) << 4) | nib(hex[i + 1]));
+    }
+    return k;
+}
+
+} // namespace
+
+namespace {
+
 volatile std::sig_atomic_t g_stop = 0;
 
 void on_signal(int) { g_stop = 1; }
@@ -46,6 +65,16 @@ int main(int argc, char* argv[]) {
     std::string upf_addr;
     uint16_t upf_port = 0;
     uint16_t gu_local_port = 20120;
+    uint32_t inactive_ms = 0; // M20: 0 = never suspend (default)
+    // M22: cell identity + Xn link to the peer gNB (dual-BS mobility).
+    uint16_t cell_id = 1;
+    int pci = 0;
+    uint16_t crnti_base = 0x0001;
+    uint16_t xn_local_port = 0, xn_peer_port = 0;
+    std::string xn_peer_addr = "127.0.0.1";
+    // M21: HSS provisioning on the command line: --subscriber imsi:hexkey
+    // (repeatable). UEs without an entry attach via legacy open access.
+    std::vector<std::pair<std::string, std::array<uint8_t, crypto::kKey256Size>>> subscribers;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -61,9 +90,24 @@ int main(int argc, char* argv[]) {
         else if (arg == "--upf-addr" && i + 1 < argc) upf_addr = argv[++i];
         else if (arg == "--upf-port" && i + 1 < argc) upf_port = static_cast<uint16_t>(std::stoi(argv[++i]));
         else if (arg == "--gu-local-port" && i + 1 < argc) gu_local_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--inactive-ms" && i + 1 < argc) inactive_ms = static_cast<uint32_t>(std::stoul(argv[++i]));
+        else if (arg == "--cell-id" && i + 1 < argc) cell_id = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--pci" && i + 1 < argc) pci = std::stoi(argv[++i]);
+        else if (arg == "--crnti-base" && i + 1 < argc) crnti_base = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--xn-local" && i + 1 < argc) xn_local_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--xn-peer" && i + 1 < argc) xn_peer_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+        else if (arg == "--subscriber" && i + 1 < argc) {
+            std::string spec = argv[++i];
+            const auto colon = spec.find(':');
+            if (colon != std::string::npos) {
+                subscribers.emplace_back(spec.substr(0, colon),
+                                         parse_key(spec.substr(colon + 1)));
+            }
+        }
     }
 
-    logging::init("BS", log_host, log_port);
+    logging::init("BS", log_host, log_port,
+                  "bs" + std::to_string(cell_id)); // M22: bs1/bs2 in logs
     LOG_INFO(ev::PROCESS_START, {{"msg", "BS protocol stack started"}});
     LOG_INFO(ev::PHY_CONFIG, {{"n_fft", std::to_string(n_fft)}, {"cp_len", std::to_string(cp_len)}});
 
@@ -82,7 +126,28 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
-    core::BsNode bs;
+    core::BsNodeConfig bs_cfg;
+    bs_cfg.inactive_ms = inactive_ms; // M20: RRC_INACTIVE suspend timer
+    bs_cfg.cell_id = cell_id;         // M22
+    bs_cfg.pci = static_cast<uint16_t>(pci);
+    bs_cfg.crnti_base = crnti_base;
+    core::BsNode bs(bs_cfg);
+
+    // M22: optional Xn link to the peer gNB (single-BS mode: leave unset).
+    cn::UdpCnLink xn_link;
+    if (xn_local_port != 0 && xn_peer_port != 0) {
+        if (!xn_link.bind(xn_local_port)) {
+            LOG_ERROR(ev::PHY_BIND_FAIL, {{"port", std::to_string(xn_local_port)}});
+            return 1;
+        }
+        xn_link.set_remote(xn_peer_addr, xn_peer_port);
+        bs.attach_xn(&xn_link, cell_id == 1 ? 2 : 1);
+        LOG_INFO(ev::NG_SETUP_RX, {{"mode", "xn-peer"},
+                                   {"amf", xn_peer_addr + ":" + std::to_string(xn_peer_port)}});
+    }
+    for (const auto& [imsi, key] : subscribers) {
+        bs.nas().add_subscriber(imsi, key); // M21: AKA for provisioned UEs
+    }
 
     // M15: optional split-core wiring. Both links must be given together.
     cn::UdpCnLink ng_link, gu_link;
@@ -109,10 +174,14 @@ int main(int argc, char* argv[]) {
                                     {"amf", amf_addr + ":" + std::to_string(amf_port)}});
     }
 
-    const phy::FrameTxConfig frame_cfg{ n_fft, cp_len, /*pci=*/0 };
-    bs.set_air_send([&](const std::vector<uint8_t>& bits) {
+    const phy::FrameTxConfig frame_cfg{ n_fft, cp_len, pci };
+    // M19: MCS-carrying radio path — BsNode picks the DL MCS per flow from
+    // CQI reports; control/broadcast bursts stay QPSK.
+    bs.set_air_send_ex([&](const core::AirFrame& frame, int mcs,
+                           const std::vector<uint8_t>& bits) {
         std::vector<std::complex<float>> iq = phy::phy_preamble_burst(frame_cfg);
-        auto data_iq = phy::phy_tx_data(bits, frame_cfg);
+        auto data_iq = phy::phy_tx_data(bits, frame_cfg,
+                                        static_cast<phy::Mcs>(mcs));
         iq.insert(iq.end(), data_iq.begin(), data_iq.end());
         phy_sock.send(phy::iq_to_bytes(iq));
     });
@@ -126,16 +195,25 @@ int main(int argc, char* argv[]) {
 
     while (!g_stop) {
         uint8_t rx_buf[65536];
+        // First datagram blocks up to 10ms; then drain the backlog
+        // non-blocking so bursts cannot pile up in the (small) kernel UDP
+        // buffer and get silently dropped (M16.1).
         int rx_len = phy_sock.recv(rx_buf, sizeof(rx_buf), 10);
-        if (rx_len > 0) {
+        while (rx_len > 0) {
             auto iq = phy::bytes_to_iq(rx_buf, rx_len);
             if (!iq.empty()) {
                 phy::FrameRxResult res;
                 auto bits = phy::phy_rx_frame(iq, frame_cfg, res);
                 if (res.synced && res.pci_confirmed && !bits.empty()) {
-                    bs.on_air_bits(bits);
+                    // M19: per-burst UL SNR feeds the TPC control loop.
+                    double pwr = 1e-12;
+                    for (const auto& s : iq) pwr += std::norm(s);
+                    const float pwr_dbm = static_cast<float>(
+                        10.0 * std::log10(pwr / iq.size() + 1e-12));
+                    bs.on_air_bits_with_metrics(bits, res.snr_db, pwr_dbm);
                 }
             }
+            rx_len = phy_sock.recv(rx_buf, sizeof(rx_buf), 0);
         }
 
         if (cmd_enabled) {
@@ -157,6 +235,10 @@ int main(int argc, char* argv[]) {
         if (!amf_addr.empty()) {
             while (ng_link.receive(0)) {}
             while (gu_link.receive(0)) {}
+        }
+        // M22: drain Xn datagrams from the peer gNB.
+        if (xn_local_port != 0) {
+            while (xn_link.receive(0)) {}
         }
 
         now_ms = monotonic_ms();

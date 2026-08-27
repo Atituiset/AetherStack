@@ -11,7 +11,7 @@ target_include_directories(core PUBLIC
 )
 
 # The node orchestration layer owns entities from every upper layer.
-target_link_libraries(core PUBLIC common mac rlc pdcp rrc nas cn phy)
+target_link_libraries(core PUBLIC common mac rlc pdcp rrc nas cn phy app)
 
 set_target_properties(core PROPERTIES
     POSITION_INDEPENDENT_CODE ON

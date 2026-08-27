@@ -35,12 +35,14 @@ public:
         usim_key_ = k;
         has_usim_ = true;
     }
-    // Session key derived after successful authentication; feeds the PDCP
-    // cipher on both ends.
+    // Session key (KASME analog) derived after successful authentication;
+    // feeds the PDCP cipher on both ends.
     const std::array<uint8_t, crypto::kKey256Size>& session_key() const {
         return session_key_;
     }
     bool authenticated() const { return authenticated_; }
+    // M21: USIM sequence number (48-bit) for the AKA freshness check.
+    uint64_t usim_sqn() const { return sqn_ms_; }
 
     void send_attach_request(const std::string& imsi);
     void send_detach();
@@ -62,6 +64,7 @@ private:
     bool has_usim_ = false;
     bool authenticated_ = false; // network verified us (set on ATTACH_ACCEPT)
     bool auth_pending_ = false;  // answered a challenge, awaiting the verdict
+    uint64_t sqn_ms_ = 0;        // M21: highest accepted SQN (freshness)
 };
 
 }

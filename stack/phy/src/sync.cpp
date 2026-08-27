@@ -102,21 +102,33 @@ std::vector<cfloat> pss_time(int nid2, int n_fft) {
 }
 
 SyncResult pss_detect(const std::vector<cfloat>& samples, int n_fft,
-                      int cp_len) {
+                      int cp_len, size_t scan_limit) {
     (void)cp_len;
     SyncResult out;
     if (static_cast<int>(samples.size()) < n_fft) return out;
 
+    // PSS time templates are per (nid2, n_fft); regenerating the Zadoff-Chu
+    // + IFFT for every received burst was a measurable CPU sink.
+    static std::vector<cfloat> tpl_cache[kNumNid2];
+    static int tpl_n_fft = -1;
+    if (tpl_n_fft != n_fft) {
+        for (auto& t : tpl_cache) t.clear();
+        tpl_n_fft = n_fft;
+    }
+
     float best_peak = -1.f;
     int best_timing = -1, best_nid2 = 0;
+    const size_t last_start =
+        std::min(samples.size() - static_cast<size_t>(n_fft), scan_limit);
 
     for (int nid2 = 0; nid2 < kNumNid2; ++nid2) {
-        auto tpl = pss_time(nid2, n_fft);
+        if (tpl_cache[nid2].empty()) tpl_cache[nid2] = pss_time(nid2, n_fft);
+        const auto& tpl = tpl_cache[nid2];
         double energy = 0;
         for (const auto& x : tpl) energy += std::norm(x);
         if (energy <= 0) continue;
 
-        for (size_t start = 0; start + n_fft <= samples.size(); ++start) {
+        for (size_t start = 0; start <= last_start; ++start) {
             cfloat corr(0, 0);
             double win_energy = 0;
             for (int k = 0; k < n_fft; ++k) {

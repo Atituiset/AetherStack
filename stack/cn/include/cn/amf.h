@@ -61,6 +61,10 @@ private:
     std::unordered_map<uint32_t, UeContext> ue_contexts_;
     std::unordered_map<uint32_t, UeContext> pending_auth_;
     std::unordered_map<uint32_t, std::vector<uint8_t>> pending_rnti_; // auth ctx
+    // M21: per-subscriber SQN + the RAND of each outstanding AKA challenge
+    // (needed to verify AUTS on the resynchronisation path).
+    std::unordered_map<std::string, uint64_t> sqn_;
+    std::unordered_map<uint32_t, std::array<uint8_t, 16>> pending_rand_;
     std::unordered_map<uint32_t, uint16_t> ho_target_; // tmsi -> tgt cell
     std::unordered_map<std::string, std::array<uint8_t, crypto::kKey256Size>> keys_;
     std::unordered_map<uint32_t, std::array<uint8_t, crypto::kKey256Size>> session_keys_;

@@ -29,9 +29,22 @@ std::vector<uint8_t> AmTx::build_pdu(uint16_t seq, uint8_t fi_with_poll,
 }
 
 std::vector<std::vector<uint8_t>> AmTx::tx(uint32_t now_ms,
-                                           const std::vector<uint8_t>& sdu) {
+                                           const std::vector<uint8_t>& sdu,
+                                           bool force) {
     std::vector<std::vector<uint8_t>> out;
     if (sdu.empty()) return out;
+    // Backpressure: refuse the new SDU while the window is full. Shedding
+    // the oldest unacked PDU instead would leave the peer's reassembly
+    // waiting for an SN that will never be retransmitted — a permanent
+    // receive-side wedge (observed in the M16 media stress runs).
+    // One-shot control SDUs (force) get a small reserve so a congested
+    // media stream cannot starve call hangups or text messages.
+    constexpr size_t kControlReserve = 4;
+    const size_t limit = cfg_.tx_buffer_limit + (force ? kControlReserve : 0);
+    if (tx_buffer_.size() >= limit) {
+        ++tx_dropped_;
+        return out;
+    }
     last_progress_ms_ = now_ms;
 
     const size_t maxp = cfg_.max_pdu_payload;
@@ -57,11 +70,6 @@ std::vector<std::vector<uint8_t>> AmTx::tx(uint32_t now_ms,
         tx_buffer_[next_sn_] = pdu; // held until the cumulative ACK covers it
         ++next_sn_;
         out.push_back(std::move(pdu));
-    }
-
-    // Backpressure: shed the oldest unacked PDUs when over the limit.
-    while (tx_buffer_.size() > cfg_.tx_buffer_limit) {
-        tx_buffer_.erase(tx_buffer_.begin());
     }
     return out;
 }
@@ -134,6 +142,7 @@ std::vector<std::vector<uint8_t>> AmTx::on_status(
 void AmRx::accept_in_order(uint16_t sn, uint8_t fi,
                            const std::vector<uint8_t>& payload, Outcome& out) {
     holes_.erase(sn); // a nacked SN just arrived (or was never a hole)
+    ++accepts_;
     switch (fi & kAmFiMask) {
         case 0x00: // complete SDU
             out.delivered.push_back(payload);
@@ -157,6 +166,46 @@ void AmRx::accept_in_order(uint16_t sn, uint8_t fi,
             break;
     }
     ++vr_next_;
+}
+
+void AmRx::drain_reorder(Outcome& out) {
+    while (!reorder_.empty()) {
+        auto it = reorder_.find(vr_next_);
+        if (it == reorder_.end()) break;
+        accept_in_order(it->first, it->second.fi, it->second.payload, out);
+        reorder_.erase(it);
+    }
+}
+
+AmRx::Outcome AmRx::tick(uint32_t now_ms) {
+    Outcome out;
+    if (cfg_.t_reorder_ms == 0) return out;
+    const int64_t now = static_cast<int64_t>(now_ms);
+    // Progress = the accept counter moved since the last tick.
+    if (accepts_ != tick_accepts_) {
+        tick_accepts_ = accepts_;
+        last_progress_ms_ = now;
+    }
+    if (holes_.empty() || last_progress_ms_ < 0 ||
+        now - last_progress_ms_ < static_cast<int64_t>(cfg_.t_reorder_ms)) {
+        return out;
+    }
+    // The peer's TX window has slid past these SNs (or the path is
+    // persistently lossy beyond the ARQ budget): waiting longer would wedge
+    // in-order delivery forever. Declare the holes lost and resynchronise —
+    // the media/app layer accounts the skipped packets as loss.
+    const size_t skipped = holes_.size();
+    for (uint16_t h : holes_) {
+        vr_next_ = static_cast<uint16_t>(h + 1); // std::set: ascending
+    }
+    holes_.clear();
+    collecting_ = false; // any partial SDU spanned a lost segment
+    partial_.clear();
+    last_progress_ms_ = now; // one skip round per t_reorder_ms at most
+    LOG_WARN(ev::RLC_UM_GAP_SKIP, {{"skipped", std::to_string(skipped)}});
+    drain_reorder(out);
+    out.status_needed = true; // peer frees its buffer via the new ack_sn
+    return out;
 }
 
 AmRx::Outcome AmRx::rx(const std::vector<uint8_t>& pdu) {
@@ -190,12 +239,7 @@ AmRx::Outcome AmRx::rx(const std::vector<uint8_t>& pdu) {
         accept_in_order(seq, fi, std::vector<uint8_t>(pdu.begin() + 3, pdu.end()),
                         out);
         // Release anything that was waiting behind this SN.
-        while (!reorder_.empty()) {
-            auto it = reorder_.find(vr_next_);
-            if (it == reorder_.end()) break;
-            accept_in_order(it->first, it->second.fi, it->second.payload, out);
-            reorder_.erase(it);
-        }
+        drain_reorder(out);
     }
 
     if (poll) out.status_needed = true;
@@ -209,6 +253,9 @@ void AmRx::reset() {
     reorder_.clear();
     collecting_ = false;
     partial_.clear();
+    accepts_ = 0;
+    tick_accepts_ = 0;
+    last_progress_ms_ = -1;
 }
 
 std::vector<uint8_t> AmRx::build_status() const {

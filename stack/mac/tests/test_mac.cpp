@@ -88,13 +88,15 @@ TEST(RachUe, FullFourStepRach) {
     EXPECT_EQ(sent_msgs.size(), 1u);
     EXPECT_EQ(sent_msgs[0], RachMsgType::MSG1_PRACH);
 
-    RaRnti test_ra_rnti = 0x432A;
+    // M22: derive from the configured preamble (the default moved from 42
+    // to 10 with cell-partitioned preambles; 0x432A was preamble 42).
+    const RaRnti test_ra_rnti = ra_rnti_for_preamble(10);
     ue.on_rar_received(test_ra_rnti, 12, 5);
     EXPECT_EQ(ue.state(), RachState::WAIT_CONTENTION_RESOLVE);
     EXPECT_EQ(sent_msgs.size(), 2u);
     EXPECT_EQ(sent_msgs[1], RachMsgType::MSG3_RRC_REQ);
 
-    ue.on_contention_resolve(0x0001);
+    ue.on_contention_resolve(0x0001, test_ra_rnti);
     EXPECT_EQ(ue.state(), RachState::CONNECTED);
 }
 
@@ -131,11 +133,15 @@ TEST(RachBs, FullFourStepBsSide) {
         sent_msgs.push_back(type);
     });
 
+    // M22: preambles are cell-partitioned; a cell-1 BS answers only its
+    // own half (0-31). Preamble 42 targets cell 2 and is now ignored.
     bs.on_prach_received(42);
+    EXPECT_TRUE(sent_msgs.empty());
+    bs.on_prach_received(10);
     EXPECT_EQ(sent_msgs.size(), 1u);
     EXPECT_EQ(sent_msgs[0], RachMsgType::MSG2_RAR);
 
-    RaRnti ra_rnti = 0x432A;
+    RaRnti ra_rnti = ra_rnti_for_preamble(10);
     bs.on_msg3_received(ra_rnti, {0x01, 0x02});
     EXPECT_EQ(sent_msgs.size(), 2u);
     EXPECT_EQ(sent_msgs[1], RachMsgType::MSG4_CONTENTION_RESOLVE);
@@ -198,7 +204,7 @@ TEST(RachE2E, UeBsFourStepHandshake) {
     // UE receives MSG4
     auto& msg4 = bs_to_ue[1].data;
     uint16_t crnti = msg4[1] | (msg4[2] << 8);
-    ue.on_contention_resolve(crnti);
+    ue.on_contention_resolve(crnti, ra_rnti);
 
     EXPECT_EQ(ue.state(), RachState::CONNECTED);
     EXPECT_TRUE(bs.is_rach_complete(ra_rnti));

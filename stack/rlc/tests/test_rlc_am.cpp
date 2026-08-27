@@ -112,3 +112,62 @@ TEST(RlcAm, PollBitRequestsStatusWithoutLoss) {
     EXPECT_TRUE(out.status_needed);      // poll honoured
     EXPECT_FALSE(rx.build_status()[3]);  // but no nacks
 }
+
+TEST(RlcAm, WindowFullRefusesNewSduInsteadOfShedding) {
+    // M16.1: shedding the oldest unacked PDU strands the peer's reassembly
+    // on an SN nobody will retransmit (permanent wedge). The transmitter
+    // must refuse NEW SDUs while the window is full and keep the old ones.
+    rlc::AmConfig cfg;
+    cfg.tx_buffer_limit = 4;
+    cfg.t_poll_ms = 1;
+    rlc::AmTx tx{cfg};
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_EQ(tx.tx(0, make_sdu(10, static_cast<uint8_t>(i))).size(), 1u);
+    }
+    EXPECT_EQ(tx.unacked(), 4u);
+    EXPECT_TRUE(tx.tx(0, make_sdu(10, 0x55)).empty()); // refused, not shed
+    EXPECT_TRUE(tx.tx(0, make_sdu(10, 0x66)).empty());
+    EXPECT_EQ(tx.tx_dropped(), 2u);
+    EXPECT_EQ(tx.unacked(), 4u);
+    // The oldest SNs are still buffered: the probe resends SN 0..3.
+    auto probe = tx.tick(10);
+    ASSERT_EQ(probe.size(), 4u);
+    for (size_t i = 0; i < probe.size(); ++i) {
+        EXPECT_EQ(probe[i][1], static_cast<uint8_t>(i)); // SN i (LE low byte)
+    }
+}
+
+TEST(RlcAm, ReorderingTimeoutSkipsStaleHoles) {
+    // M16.1: a hole that stops making progress past t_reorder_ms is declared
+    // lost; in-order delivery resynchronises instead of wedging forever.
+    rlc::AmConfig cfg;
+    cfg.poll_every = 255;
+    cfg.t_reorder_ms = 100;
+    rlc::AmRx rx{cfg};
+
+    rlc::AmTx tx;
+    auto pdu0 = tx.tx(0, make_sdu(10, 0xA0)); // sn0
+    auto pdu1 = tx.tx(0, make_sdu(10, 0xB0)); // sn1 (will be "lost")
+    auto pdu2 = tx.tx(0, make_sdu(10, 0xC0)); // sn2
+    (void)pdu1;
+
+    EXPECT_EQ(rx.rx(pdu0[0]).delivered.size(), 1u);
+    auto held = rx.rx(pdu2[0]); // hole at sn1, sn2 held
+    EXPECT_TRUE(held.delivered.empty());
+    EXPECT_EQ(rx.vr_next(), 1u);
+
+    // Progress baseline anchors on the first tick; the hole ages from there.
+    EXPECT_TRUE(rx.tick(0).delivered.empty());
+    EXPECT_TRUE(rx.tick(50).delivered.empty()); // within the deadline
+    auto out = rx.tick(150);                    // deadline exceeded
+    EXPECT_EQ(out.delivered.size(), 1u);        // sn2 freed by the skip
+    EXPECT_EQ(out.delivered[0], make_sdu(10, 0xC0));
+    EXPECT_TRUE(out.status_needed);             // peer learns the new ack_sn
+    EXPECT_EQ(rx.vr_next(), 3u);
+    EXPECT_EQ(rx.build_status()[3], 0);         // holes cleared
+
+    // The "lost" PDU arriving late is dropped as stale, not delivered twice.
+    EXPECT_TRUE(rx.rx(pdu1[0]).delivered.empty());
+    EXPECT_EQ(rx.vr_next(), 3u);
+}
+

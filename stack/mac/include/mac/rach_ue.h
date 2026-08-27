@@ -24,12 +24,17 @@ public:
 
     // Trigger RACH procedure (e.g., from RRC)
     void start_rach();
+    // M22: re-target the next RACH at a (possibly different) cell —
+    // preamble partitioning by cell id (see rach_common.h).
+    void set_preamble_index(PreambleIndex idx) { config_.preamble_index = idx; }
 
     // Handle received MSG2 (RAR)
     void on_rar_received(RaRnti ra_rnti, uint16_t timing_advance, uint8_t ul_grant);
 
-    // Handle received MSG4 (contention resolution)
-    void on_contention_resolve(uint16_t crnti);
+    // Handle received MSG4 (contention resolution). ra_rnti identifies the
+    // random-access context the C-RNTI was granted on; mismatches (another
+    // UE's MSG4 on the shared medium) are ignored.
+    void on_contention_resolve(uint16_t crnti, RaRnti ra_rnti);
 
     // Timeout handlers
     void on_rar_timeout();

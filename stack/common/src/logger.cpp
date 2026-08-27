@@ -1,6 +1,7 @@
 #include "common/logger.h"
 
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -18,6 +19,7 @@ namespace logging {
 namespace {
 
 std::string g_module = "UNKNOWN";
+std::string g_node = "unknown";
 std::string g_remote_host;
 uint16_t g_remote_port = 0;
 int g_udp_sock = -1;
@@ -76,10 +78,16 @@ std::string level_to_string(Level lvl) {
 
 void init(const std::string& module_name,
           const std::string& remote_host,
-          uint16_t remote_port) {
+          uint16_t remote_port,
+          const std::string& node_name) {
     std::lock_guard<std::mutex> lock(g_mutex);
 
     g_module = module_name;
+    g_node = node_name;
+    if (g_node.empty()) {
+        g_node = module_name;
+        for (char& c : g_node) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
     g_remote_host = remote_host;
     g_remote_port = remote_port;
 
@@ -120,6 +128,7 @@ void log(Level level,
     ss << "{"
        << "\"timestamp\":\"" << iso8601_utc_now() << "\""
        << ",\"module\":\"" << escape_json(g_module) << "\""
+       << ",\"node\":\"" << escape_json(g_node) << "\""
        << ",\"level\":\"" << level_to_string(level) << "\""
        << ",\"event\":\"" << escape_json(event) << "\""
        << ",\"fields\":{";

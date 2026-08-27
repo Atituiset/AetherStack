@@ -1,5 +1,6 @@
 add_library(nas STATIC
     src/nas_messages.cpp
+    src/aka.cpp
     src/nas_ue.cpp
     src/nas_bs.cpp
 )

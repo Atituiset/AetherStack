@@ -9,6 +9,7 @@ enum class UeState : uint8_t {
     IDLE = 0,
     CONNECTING = 1,
     CONNECTED = 2,
+    INACTIVE = 3, // M20: RRC_INACTIVE — context kept, registration retained
 };
 
 const char* ue_state_str(UeState s);
@@ -28,6 +29,13 @@ enum class RrcMessageType : uint8_t {
     REESTABLISHMENT_REQUEST = 23,  // UE -> cell: [old_crnti:2][old_cell:2]
     REESTABLISHMENT_OK = 24,       // cell -> UE: [new_crnti:2]
     REESTABLISHMENT_FAILURE = 25,  // cell -> UE: context gone
+
+    // M20: RRC_INACTIVE suspend/resume. RELEASE carries
+    // [crnti:2][flags:1][resume_id:4] when flags != 0
+    // (bit0 = suspend-with-id BS->UE, bit1 = suspend request UE->BS).
+    RESUME_REQUEST = 30,           // UE -> cell: [resume_id:4]
+    RESUME_OK = 31,                // cell -> UE: [new_crnti:2]
+    RESUME_FAILURE = 32,           // cell -> UE: stale/unknown resume_id
 };
 
 }

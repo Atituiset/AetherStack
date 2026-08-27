@@ -1,5 +1,6 @@
 add_library(app STATIC
     src/app_layer.cpp
+    src/u2u.cpp
 )
 
 target_include_directories(app PUBLIC

@@ -42,9 +42,13 @@ inline size_t valid_coded_bits(const HarqHeader& h) {
 // ---- TX side ----------------------------------------------------------------
 
 struct HarqTxConfig {
-    uint8_t num_processes = 4;
+    uint8_t num_processes = 8;
     uint8_t max_retx = 3;
-    uint32_t ack_timeout_ms = 80; // covers a channel round trip + processing
+    // Must comfortably exceed the worst-case round trip (channel latency +
+    // peer processing + queueing) or every busy-but-healthy block gets
+    // retransmitted, doubling process occupancy and feeding a congestion
+    // spiral. Measured loaded RTT at media rates is 100-250 ms.
+    uint32_t ack_timeout_ms = 250;
 };
 
 class HarqTx {
@@ -80,6 +84,7 @@ public:
         for (const auto& p : procs_) n += p.busy ? 1 : 0;
         return n;
     }
+    size_t num_processes() const { return procs_.size(); }
 
 private:
     // Core retransmission logic; appends to `sink`.
@@ -128,7 +133,7 @@ private:
         std::vector<uint8_t> bits; // previous attempt's coded bits
     };
     std::vector<uint8_t>* find_soft(uint8_t proc);
-    std::vector<SoftBuf> soft_; // one slot per active proc id seen
+    std::vector<SoftBuf> soft_{8}; // one slot per HARQ process id
 };
 
 // True when the payload carries a HARQ header (magic byte check). Frames

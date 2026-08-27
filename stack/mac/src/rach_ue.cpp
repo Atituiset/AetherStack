@@ -44,6 +44,12 @@ void RachUe::on_rar_received(RaRnti ra_rnti, uint16_t timing_advance, uint8_t ul
         LOG_WARN(ev::RAR_IGNORED, {{"state", rach_state_str(state_)}});
         return;
     }
+    // Shared medium: accept only the RAR answering our own preamble.
+    if (ra_rnti != ra_rnti_for_preamble(config_.preamble_index)) {
+        LOG_DEBUG(ev::RAR_IGNORED, {{"reason", "ra_rnti_mismatch"},
+                                    {"ra_rnti", std::to_string(ra_rnti)}});
+        return;
+    }
     assigned_ra_rnti_ = ra_rnti;
     LOG_INFO(ev::MAC_RACH_MSG2_RX, {{"ra_rnti", std::to_string(ra_rnti)},
                                    {"ta", std::to_string(timing_advance)}});
@@ -65,9 +71,15 @@ void RachUe::on_rar_received(RaRnti ra_rnti, uint16_t timing_advance, uint8_t ul
                                 {"ccch_len", std::to_string(msg3.size() - 3)}});
 }
 
-void RachUe::on_contention_resolve(uint16_t crnti) {
+void RachUe::on_contention_resolve(uint16_t crnti, RaRnti ra_rnti) {
     if (state_ != RachState::WAIT_CONTENTION_RESOLVE) {
         LOG_WARN(ev::CR_IGNORED, {{"state", rach_state_str(state_)}});
+        return;
+    }
+    // Shared medium: claim the C-RNTI only from our own context's MSG4.
+    if (ra_rnti != assigned_ra_rnti_) {
+        LOG_DEBUG(ev::CR_IGNORED, {{"reason", "ra_rnti_mismatch"},
+                                   {"ra_rnti", std::to_string(ra_rnti)}});
         return;
     }
     assigned_crnti_ = crnti;

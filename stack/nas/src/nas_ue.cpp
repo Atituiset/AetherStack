@@ -1,4 +1,6 @@
 #include "nas/nas_ue.h"
+#include "nas/aka.h"
+#include <algorithm>
 #include "common/logger.h"
 
 namespace nas {
@@ -76,20 +78,55 @@ void NasUe::force_deregistered() {
 void NasUe::on_message(const std::vector<uint8_t>& pdu) {
     auto msg = NasMessage::decode(pdu);
     if (msg.msg_type == NasMessageType::AUTH_REQUEST) {
-        // M12: network authentication challenge during REGISTERING.
+        // M21: AKA challenge [RAND:16][AUTN:16] during REGISTERING.
         if (state_ != UeState::REGISTERING || !has_usim_ ||
-            msg.value.size() < 32) {
+            msg.value.size() != 2 * aka::kRandLen) {
             LOG_WARN(ev::NAS_AUTH_REQ_IGNORED,
                      {{"state", ue_state_str(state_)}});
             return;
         }
-        std::vector<uint8_t> rand(msg.value.begin(),
-                                  msg.value.begin() + 32);
-        auto res = crypto::hmac_sha256(usim_key_, rand);
+        std::array<uint8_t, aka::kRandLen> rand;
+        std::array<uint8_t, aka::kAutnLen> autn;
+        std::copy_n(msg.value.begin(), aka::kRandLen, rand.begin());
+        std::copy_n(msg.value.begin() + aka::kRandLen, aka::kAutnLen,
+                    autn.begin());
 
-        std::vector<uint8_t> kd = rand;
-        kd.insert(kd.end(), {'u', 'p', '-', 'e', 'n', 'c'});
-        session_key_ = crypto::hmac_sha256(usim_key_, kd);
+        auto send_failure = [&](uint8_t cause,
+                                const std::vector<uint8_t>& auts = {}) {
+            NasMessage fail;
+            fail.msg_type = NasMessageType::AUTH_FAILURE;
+            fail.value.push_back(cause);
+            fail.value.push_back(static_cast<uint8_t>(imsi_.size()));
+            fail.value.insert(fail.value.end(), imsi_.begin(), imsi_.end());
+            fail.value.insert(fail.value.end(), auts.begin(), auts.end());
+            if (send_cb_) send_cb_(fail.encode());
+        };
+
+        // 1) MAC check: does the network prove knowledge of K?
+        auto sqn = aka::verify_autn(usim_key_, rand, autn);
+        if (!sqn.has_value()) {
+            LOG_WARN(ev::NAS_AUTH_FAIL,
+                     {{"imsi", imsi_}, {"cause", "mac"}});
+            send_failure(aka::kCauseMacFailure);
+            return;
+        }
+        // 2) Freshness: SQN must advance past the highest accepted one.
+        if (*sqn <= sqn_ms_) {
+            auto auts = aka::build_auts(usim_key_, sqn_ms_, rand);
+            LOG_WARN(ev::NAS_AUTH_FAIL,
+                     {{"imsi", imsi_}, {"cause", "synch"}});
+            send_failure(aka::kCauseSynchFailure,
+                         {auts.begin(), auts.end()});
+            return;
+        }
+        // 3) Accept: adopt SQN, answer RES, derive KASME (CK||IK bound).
+        sqn_ms_ = *sqn;
+        auto res = aka::f2(usim_key_, rand);
+        const auto ck = aka::f3(usim_key_, rand);
+        const auto ik = aka::f4(usim_key_, rand);
+        std::array<uint8_t, aka::kAkLen> sqn_xor_ak;
+        std::copy_n(autn.begin(), aka::kAkLen, sqn_xor_ak.begin());
+        session_key_ = aka::kasme(ck, ik, sqn_xor_ak);
         // The UE cannot know on its own whether RES is correct; the verdict
         // arrives implicitly with the ATTACH_ACCEPT.
         auth_pending_ = true;
@@ -98,7 +135,8 @@ void NasUe::on_message(const std::vector<uint8_t>& pdu) {
         resp.msg_type = NasMessageType::AUTH_RESPONSE;
         resp.value.assign(res.begin(), res.end());
         auto encoded = resp.encode();
-        LOG_INFO(ev::NAS_AUTH_RESPONSE_TX, {});
+        LOG_INFO(ev::NAS_AUTH_RES,
+                 {{"imsi", imsi_}, {"res", aka::hex_prefix(res)}});
         if (send_cb_) send_cb_(encoded);
         return;
     }

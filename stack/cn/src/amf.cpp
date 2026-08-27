@@ -1,7 +1,18 @@
 #include "cn/amf.h"
+#include "nas/aka.h"
 #include "nas/nas_messages.h"
 #include "common/logger.h"
 #include <algorithm>
+#include <random>
+
+namespace {
+std::array<uint8_t, nas::aka::kRandLen> amf_rand() {
+    static std::mt19937_64 rng{std::random_device{}()};
+    std::array<uint8_t, nas::aka::kRandLen> r;
+    for (auto& b : r) b = static_cast<uint8_t>(rng() & 0xFF);
+    return r;
+}
+} // namespace
 
 namespace cn {
 
@@ -37,25 +48,29 @@ void Amf::handle(const CnMessage& msg) {
             // unknown IMSIs keep the legacy open-access path.
             auto kit = keys_.find(imsi);
             if (kit != keys_.end()) {
-                std::vector<uint8_t> rand(32);
-                uint32_t seed = 0x12345678u ^ static_cast<uint32_t>(new_tmsi);
-                for (auto& b : rand) {
-                    seed = seed * 1103515245u + 12345u;
-                    b = static_cast<uint8_t>((seed >> 16) & 0xFF);
-                }
-                auto res_mac = crypto::hmac_sha256(kit->second, rand);
-                std::vector<uint8_t> kd = rand;
-                kd.insert(kd.end(), {'u', 'p', '-', 'e', 'n', 'c'});
-                auto sk = crypto::hmac_sha256(kit->second, kd);
+                // M21: AKA vector (fresh RAND + advancing SQN per attach).
+                const uint64_t sqn =
+                    (++sqn_[imsi]) & nas::aka::kSqnMask;
+                const auto r = amf_rand();
+                auto av = nas::aka::generate(kit->second, sqn, r);
 
                 pending_auth_[new_tmsi] = ctx;
-                session_keys_[new_tmsi] = sk;
+                session_keys_[new_tmsi] = av.kasme;
                 pending_rnti_[new_tmsi] =
-                    std::vector<uint8_t>(res_mac.begin(), res_mac.end());
+                    std::vector<uint8_t>(av.xres.begin(), av.xres.end());
+                pending_rand_[new_tmsi] = av.rand;
 
                 nas::NasMessage req;
                 req.msg_type = nas::NasMessageType::AUTH_REQUEST;
-                req.value = rand;
+                const auto a = nas::aka::autn(av);
+                req.value.insert(req.value.end(), av.rand.begin(),
+                                 av.rand.end());
+                req.value.insert(req.value.end(), a.begin(), a.end());
+                LOG_INFO(ev::NAS_AUTH_VECTOR,
+                         {{"imsi", imsi},
+                          {"rand", nas::aka::hex_prefix(av.rand)},
+                          {"sqn_masked",
+                           nas::aka::hex_prefix(av.sqn_xor_ak)}});
                 auto pdu = req.encode();
                 std::vector<uint8_t> v;
                 put32(v, new_tmsi);
@@ -95,8 +110,89 @@ void Amf::handle(const CnMessage& msg) {
 
             // ---- authentication response (identified by RES content) -----
             auto nas = nas::NasMessage::decode(pdu);
+            if (nas.msg_type == nas::NasMessageType::AUTH_FAILURE) {
+                // M21: [cause][imsi_len][imsi][AUTS?] — mirror of NasBs.
+                if (nas.value.size() < 2 ||
+                    nas.value.size() <
+                        2 + static_cast<size_t>(nas.value[1])) {
+                    return;
+                }
+                const uint8_t cause = nas.value[0];
+                const std::string fimsi(nas.value.begin() + 2,
+                                        nas.value.begin() + 2 + nas.value[1]);
+                auto pit = pending_auth_.find(tmsi);
+                if (pit == pending_auth_.end() ||
+                    pit->second.imsi != fimsi) {
+                    return;
+                }
+                if (cause == nas::aka::kCauseSynchFailure &&
+                    nas.value.size() >=
+                        2 + nas.value[1] + nas::aka::kAutsLen) {
+                    std::array<uint8_t, nas::aka::kAutsLen> auts;
+                    std::copy_n(nas.value.begin() + 2 + nas.value[1],
+                                nas::aka::kAutsLen, auts.begin());
+                    const auto& k = keys_[fimsi];
+                    auto sqn_ms = nas::aka::verify_auts(
+                        k, auts, pending_rand_[tmsi]);
+                    LOG_WARN(ev::NAS_AUTH_FAIL,
+                             {{"imsi", fimsi}, {"cause", "synch"}});
+                    if (sqn_ms.has_value()) {
+                        sqn_[fimsi] = *sqn_ms & nas::aka::kSqnMask;
+                        pending_auth_.erase(pit);
+                        pending_rnti_.erase(tmsi);
+                        pending_rand_.erase(tmsi);
+                        // Retry with a fresh vector (SQNms+1, new RAND).
+                        const uint64_t sqn =
+                            (++sqn_[fimsi]) & nas::aka::kSqnMask;
+                        const auto r = amf_rand();
+                        auto av = nas::aka::generate(k, sqn, r);
+                        UeContext ctx2;
+                        ctx2.imsi = fimsi;
+                        ctx2.tmsi = tmsi;
+                        ctx2.serving_rnti = rnti;
+                        pending_auth_[tmsi] = ctx2;
+                        session_keys_[tmsi] = av.kasme;
+                        pending_rnti_[tmsi] =
+                            std::vector<uint8_t>(av.xres.begin(),
+                                                 av.xres.end());
+                        pending_rand_[tmsi] = av.rand;
+                        nas::NasMessage req;
+                        req.msg_type = nas::NasMessageType::AUTH_REQUEST;
+                        const auto a = nas::aka::autn(av);
+                        req.value.insert(req.value.end(), av.rand.begin(),
+                                         av.rand.end());
+                        req.value.insert(req.value.end(), a.begin(), a.end());
+                        LOG_INFO(ev::NAS_AUTH_VECTOR,
+                                 {{"imsi", fimsi},
+                                  {"rand", nas::aka::hex_prefix(av.rand)},
+                                  {"sqn_masked",
+                                   nas::aka::hex_prefix(av.sqn_xor_ak)}});
+                        auto rpdu = req.encode();
+                        std::vector<uint8_t> rv;
+                        put32(rv, tmsi);
+                        put16(rv, rnti);
+                        rv.push_back(
+                            static_cast<uint8_t>(rpdu.size() & 0xFF));
+                        rv.push_back(
+                            static_cast<uint8_t>((rpdu.size() >> 8) & 0xFF));
+                        rv.insert(rv.end(), rpdu.begin(), rpdu.end());
+                        send(MsgType::DOWNLINK_NAS, std::move(rv));
+                    } else {
+                        pending_auth_.erase(pit);
+                        pending_rnti_.erase(tmsi);
+                        pending_rand_.erase(tmsi);
+                    }
+                    return;
+                }
+                LOG_WARN(ev::NAS_AUTH_FAIL,
+                         {{"imsi", fimsi}, {"cause", "mac"}});
+                pending_auth_.erase(pit);
+                pending_rnti_.erase(tmsi);
+                pending_rand_.erase(tmsi);
+                return;
+            }
             if (nas.msg_type == nas::NasMessageType::AUTH_RESPONSE &&
-                nas.value.size() == 32) {
+                nas.value.size() == nas::aka::kResLen) {
                 auto pit = pending_auth_.find(tmsi);
                 if (pit != pending_auth_.end()) {
                     const auto& xres = pending_rnti_[tmsi];
@@ -105,9 +201,10 @@ void Amf::handle(const CnMessage& msg) {
                         UeContext ctx = pit->second;
                         pending_auth_.erase(pit);
                         pending_rnti_.erase(tmsi);
+                        pending_rand_.erase(tmsi);
                         ctx.registered = true;
                         ue_contexts_[ctx.tmsi] = ctx;
-                        LOG_INFO(ev::NAS_AUTH_OK, {{"imsi", ctx.imsi}});
+                        LOG_INFO(ev::NAS_AUTH_SUCCESS, {{"imsi", ctx.imsi}});
 
                         // Deliver ATTACH_ACCEPT ...
                         nas::NasMessage acc;
@@ -135,7 +232,26 @@ void Amf::handle(const CnMessage& msg) {
                         send(MsgType::SESSION_KEY, std::move(kv));
                         return;
                     }
-                    LOG_WARN(ev::NAS_AUTH_FAIL, {});
+                    LOG_WARN(ev::NAS_AUTH_FAIL,
+                             {{"imsi", pit->second.imsi},
+                              {"cause", "res_mismatch"}});
+                    nas::NasMessage rej;
+                    rej.msg_type = nas::NasMessageType::ATTACH_REJECT;
+                    for (int i = 0; i < 4; ++i)
+                        rej.value.push_back(static_cast<uint8_t>(
+                            (tmsi >> (8 * i)) & 0xFF));
+                    auto rpdu = rej.encode();
+                    std::vector<uint8_t> rv;
+                    put32(rv, tmsi);
+                    put16(rv, rnti);
+                    rv.push_back(static_cast<uint8_t>(rpdu.size() & 0xFF));
+                    rv.push_back(
+                        static_cast<uint8_t>((rpdu.size() >> 8) & 0xFF));
+                    rv.insert(rv.end(), rpdu.begin(), rpdu.end());
+                    send(MsgType::DOWNLINK_NAS, std::move(rv));
+                    pending_auth_.erase(pit);
+                    pending_rnti_.erase(tmsi);
+                    pending_rand_.erase(tmsi);
                     return;
                 }
                 LOG_WARN(ev::NAS_AUTH_RESP_UNKNOWN, {});
