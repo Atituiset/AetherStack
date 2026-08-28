@@ -3,6 +3,7 @@ add_library(nas STATIC
     src/aka.cpp
     src/nas_ue.cpp
     src/nas_bs.cpp
+    src/trial_fp_engine.cpp
 )
 
 target_include_directories(nas PUBLIC
