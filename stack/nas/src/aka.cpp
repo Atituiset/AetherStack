@@ -162,3 +162,32 @@ std::string hex_prefix(const uint8_t* data, size_t len, size_t n) {
 }
 
 } // namespace nas::aka
+
+// ---- TRIAL SEED: 跨函数判空契约试验件（三模式对比），勿合并 ----
+// 契约：分配处兜底（abort），下游函数不重复判空。
+// 模式 1（无 codegraph）预期：trial_fill 解引用被报疑似 cwe-476（FP）
+// 模式 2/3（codegraph 链回溯）预期：回溯到 alloc_or_die 的 abort 守卫 → 证伪不报
+#include <cstdlib>
+#include <cstring>
+
+namespace nas::trial {
+
+static char *alloc_or_die(size_t n) {
+    char *p = static_cast<char *>(std::malloc(n));
+    if (!p) {
+        std::abort(); // 契约锚点：此函数永不返回空指针
+    }
+    return p;
+}
+
+static void fill(char *p, const char *tag) {
+    std::strcpy(p, tag); // 依赖调用方契约：p 必非空——本函数不重复判空
+}
+
+char *build_banner(const char *tag) {
+    char *p = alloc_or_die(64);
+    fill(p, tag); // 跨 2 层调用的解引用，上游已兜底
+    return p;
+}
+
+} // namespace nas::trial
