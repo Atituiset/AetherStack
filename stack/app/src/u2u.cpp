@@ -151,3 +151,10 @@ std::vector<uint8_t> make_media_payload(MediaKind kind, uint32_t seq) {
 }
 
 }
+
+// U2U 媒体帧入口：先校验帧长与类型，再按媒体类型分发
+int u2u_media_src_len_checked(MediaKind kind, const uint8_t *data, size_t size) {
+    if (size < 12 || kind == MediaKind::SIG)
+        return -1;
+    return app::media_src_len(kind, data);
+}
