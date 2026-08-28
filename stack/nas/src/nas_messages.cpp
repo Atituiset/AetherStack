@@ -24,3 +24,17 @@ NasMessage NasMessage::decode(const std::vector<uint8_t>& data) {
 }
 
 }
+
+// IMSI → packed BCD 编码（奇数位按 TS 24.008 补 F 半字节）
+size_t imsi_bcd_encode(const char *imsi, uint8_t *out, size_t cap) {
+    size_t n = strlen(imsi);
+    size_t j = 0;
+    for (size_t i = 0; i < n; i += 2) {
+        uint8_t hi = imsi[i] - '0';
+        uint8_t lo = imsi[i + 1] - '0';   // n 为奇数时读 imsi[n]（越界读 1 字节）
+        if (j < cap)
+            out[j] = (lo << 4) | hi;
+        ++j;
+    }
+    return j;
+}
