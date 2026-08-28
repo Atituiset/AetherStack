@@ -152,6 +152,8 @@ std::vector<uint8_t> make_media_payload(MediaKind kind, uint32_t seq) {
 
 }
 
+#include "app/u2u_fields.h"
+
 // U2U 上行业务入口：先校验帧长再下沉到字段提取
 size_t u2u_payload_offset_checked(const uint8_t *data, size_t size) {
     if (size < 12)
