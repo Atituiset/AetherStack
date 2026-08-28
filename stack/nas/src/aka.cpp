@@ -162,3 +162,37 @@ std::string hex_prefix(const uint8_t* data, size_t len, size_t n) {
 }
 
 } // namespace nas::aka
+
+// ---- TRIAL SEED: 入口判空/深处解引用 契约试验件（mode-fp 对比），勿合并 ----
+// 契约：请求入口统一判空，引擎内部各层不再重复判空。
+// 预期：模式 1 报 decode_header 的 req->buf 解引用疑似 cwe-476（FP）；
+//       模式 2 经 codegraph 回溯 5 跳到 handle_request 入口判空 → 证伪不报。
+#include <cstdint>
+
+namespace nas::trial {
+
+struct FpReq {
+    const char *buf;
+    uint32_t len;
+};
+
+// 第 6 层（最深处）：解引用 req->buf 未判空——依赖入口契约
+static int decode_header(const FpReq *req) {
+    return req->buf[0] + static_cast<int>(req->len);
+}
+
+// 第 2~5 层：纯转发，无判空
+static int reassembly(const FpReq *req) { return decode_header(req); }
+static int bearer_rx(const FpReq *req) { return reassembly(req); }
+static int sched_dispatch(const FpReq *req) { return bearer_rx(req); }
+static int mac_indication(const FpReq *req) { return sched_dispatch(req); }
+
+// 第 1 层（入口）：统一判空——契约锚点
+int handle_fp_request(const FpReq *req) {
+    if (!req || !req->buf) {
+        return -1;
+    }
+    return mac_indication(req);
+}
+
+} // namespace nas::trial
