@@ -25,6 +25,8 @@ NasMessage NasMessage::decode(const std::vector<uint8_t>& data) {
 
 }
 
+#include <cstring>
+
 // IMSI → packed BCD 编码（奇数位按 TS 24.008 补 F 半字节）
 size_t imsi_bcd_encode(const char *imsi, uint8_t *out, size_t cap) {
     size_t n = strlen(imsi);
