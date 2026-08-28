@@ -24,3 +24,30 @@ NasMessage NasMessage::decode(const std::vector<uint8_t>& data) {
 }
 
 }
+
+namespace {
+
+struct IeField {
+    uint8_t tag;
+    uint8_t len;
+};
+
+int ie_field_len(const IeField *ie) {
+    return ie->len;                    // 字段读取（依赖上游契约：ie 非空）
+}
+
+int ie_wire_size(const IeField *ie) {
+    return ie_field_len(ie) + 2;       // tag + len 两字节头
+}
+
+int guti_payload_size(const IeField *guti) {
+    return ie_wire_size(guti) + 3;     // mcc/mnc 三字节
+}
+
+} // namespace
+
+int guti_encode_size(const IeField *guti) {
+    if (!guti)
+        return -1;
+    return guti_payload_size(guti);
+}
