@@ -162,3 +162,18 @@ std::string hex_prefix(const uint8_t* data, size_t len, size_t n) {
 }
 
 } // namespace nas::aka
+
+// ---- TRIAL SEED: 入口判空 → 表驱动引擎（mode-fp-tbl 对比），勿合并 ----
+#include "nas/trial_fp.h"
+
+namespace nas::trial {
+
+// 入口（第 1 层）：统一判空——契约锚点
+int handle_fp_request(const FpReq *req) {
+    if (!req || !req->buf) {
+        return -1;
+    }
+    return fp_engine_run(2, req); // 经函数指针表 → decode_header（契约保证非空）
+}
+
+} // namespace nas::trial
