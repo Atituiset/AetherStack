@@ -1,0 +1,64 @@
+# navmap 语义导航图 — nightly 提取（目标仓模板）
+# 拓扑（重要）：navmap 不在 PR CI 里跑。它在目标仓按 schedule 提取并把产物提交回仓库，
+# PR 评审 workflow 只消费已提交的产物（.navmap/out/），PR 时延零增加。
+# 安装：复制到目标仓 .github/workflows/navmap-nightly.yml，按需修改 SUBSYSTEM/COMPDB 步骤。
+
+name: navmap-nightly
+
+on:
+  schedule:
+    - cron: '17 18 * * *'   # 每日低峰（UTC 18:17 = 北京 02:17）
+  workflow_dispatch:        # 手动触发（首跑/调试）
+
+permissions:
+  contents: write   # 产物提交回仓库
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    env:
+      SUBSYSTEM: stack
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # refresh 需要 git diff 基线
+
+      - name: 生成 compile_commands.json（按目标仓构建系统调整）
+        run: cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Checkout navmap + 安装
+        uses: actions/checkout@v4
+        with:
+          repository: Atituiset/navmap
+          path: .navmap-tool
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python3 -m venv .navmap-tool/.venv
+          .navmap-tool/.venv/bin/pip install -q -e '.navmap-tool[dev]'
+
+      - name: 增量刷新（首跑自动转全量）
+        run: |
+          BASELINE=$(git rev-parse HEAD)
+          if [ -f ".navmap/out/navmap-dispatch-$SUBSYSTEM.json" ]; then
+            .navmap-tool/.venv/bin/navmap refresh \
+              --src "$GITHUB_WORKSPACE" --compdb build/compile_commands.json \
+              --subsystem "$SUBSYSTEM" --out .navmap/out/
+          else
+            .navmap-tool/.venv/bin/navmap extract \
+              --src "$GITHUB_WORKSPACE" --compdb build/compile_commands.json \
+              --baseline "$BASELINE" --subsystem "$SUBSYSTEM" --out .navmap/out/
+          fi
+
+      - name: 质检报告
+        run: .navmap-tool/.venv/bin/navmap report --out .navmap/out/ || true
+
+      - name: 产物提交回仓库（navmap-outputs 分支）
+        run: |
+          git config user.email "navmap-bot@users.noreply.github.com"
+          git config user.name "navmap-bot"
+          git checkout -B navmap-outputs
+          git add -f .navmap/out/
+          git commit -qm "navmap: $(git rev-parse --short HEAD) 产物刷新" || { echo "无变化"; exit 0; }
+          git push -f origin navmap-outputs
