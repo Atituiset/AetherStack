@@ -1,5 +1,7 @@
 # AetherStack
 
+> 📖 技术文档（GitHub Pages）：<https://atituiset.github.io/AetherStack/>
+
 A 5G-NR-inspired **software protocol stack** written from scratch in C++17 —
 PHY to user plane — with a live UDP/OFDM air interface, a channel simulator,
 and a Web-based Local Maintenance Terminal (LMT).
