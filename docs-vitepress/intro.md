@@ -34,4 +34,4 @@ make          # 编译 C++ 协议栈
 ./start_demo.sh  # 一键启动全部组件
 ```
 
-浏览器打开 http://localhost:3000 查看 Web LMT。
+浏览器打开 `http://localhost:3000` 查看 Web LMT。

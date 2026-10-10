@@ -9,8 +9,10 @@ __pycache__/
 # Node
 lmt/node_modules/
 
-# mdBook build output
-docs-book/book/
+# VitePress build output
+docs-vitepress/.vitepress/dist
+docs-vitepress/.vitepress/cache
+docs-vitepress/node_modules/
 
 # IDE
 .vscode/
